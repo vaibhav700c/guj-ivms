@@ -23,3 +23,4 @@ dist/
 
 # App data
 snapshots/
+.vercel/

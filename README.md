@@ -49,8 +49,19 @@ docker compose up --build
 
 ## Cloud deployment (already wired)
 
-- **Backend + Postgres → Render:** repository contains `render.yaml` (Blueprint). In Render: *New → Blueprint → select repo*; set `CORS_ORIGINS` to the Vercel URL after frontend deploys.
-- **Frontend → Vercel:** root directory `frontend/`, framework *Vite*. Set `VITE_API_URL=https://<render-backend>.onrender.com` and `VITE_WS_URL=wss://<render-backend>.onrender.com`.
+**🔴 Live URLs**
+
+| Component | URL |
+|---|---|
+| Control Room UI (Vercel) | **https://guj-ivms.vercel.app** |
+| Backend API (Render) | **https://guj-ivms-api.onrender.com** |
+| Swagger docs | https://guj-ivms-api.onrender.com/docs |
+| WebSocket live alerts | wss://guj-ivms-api.onrender.com/ws/alerts |
+
+Deployed via Render (Docker backend + managed PostgreSQL, `render.yaml` Blueprint
+spec in repo) and Vercel (`frontend/vercel.json`, Vite). First boot auto-seeded
+50 cameras, watchlist, VAHAN records and users into Postgres, and the demo
+simulator is generating live events/alerts.
 
 ## API surface (v1)
 

@@ -1,5 +1,10 @@
 # Deployment — Vercel (frontend) + Render (backend + PostgreSQL)
 
+> ✅ **Already deployed** — UI: https://guj-ivms.vercel.app · API: https://guj-ivms-api.onrender.com
+> Render service: `guj-ivms-api` (srv-daasn4ss728c73e22ocg) · Postgres: `guj-ivms-db` (dpg-daasmtoae00c73al6230-a, oregon)
+
+The steps below document how this deployment was created and how to reproduce it.
+
 ## 1. Render backend (Blueprint)
 
 1. Push this repo to GitHub (done via `gh repo create`).
