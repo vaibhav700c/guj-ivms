@@ -1,13 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import {
-  MonitorPlay,
-  Maximize2,
-  WifiOff,
-  Loader2,
-  ExternalLink,
-  Grid3X3,
-  Play,
+  MonitorPlay, Maximize2, WifiOff, Loader2, Grid2X2, Grid3X3,
+  LayoutGrid, Search, X, ExternalLink, Copy, Check,
 } from "lucide-react";
 import { api, formatTime } from "../lib/api";
 
@@ -15,47 +10,43 @@ const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 const SENTINEL_PORTAL = "https://live.sentinelgujarat.in";
 
 interface Camera {
-  id: number;
-  external_id: string | null;
-  name: string;
-  city: string | null;
-  status: string;
-  stream_url: string | null;    // HLS CDN (direct, requires browser auth)
-  rtsp_url: string | null;
-  whep_url: string | null;
-  stream_protocol: string | null;
-  resolution: string | null;
-  analytics_tier: string;
+  id: number; external_id: string | null; name: string;
+  city: string | null; status: string; stream_url: string | null;
+  rtsp_url: string | null; whep_url: string | null;
+  resolution: string | null; analytics_tier: string;
 }
 
-const LAYOUTS = { "2x2": 4, "3x3": 9, "4x4": 16 } as const;
+const LAYOUTS = { "2×2": 4, "3×3": 9, "4×4": 16 } as const;
 type LayoutKey = keyof typeof LAYOUTS;
 
-const HLS_CDN = "https://cctv.corp8.cloud";
-
-/** Exponential backoff helper — integration.txt §3: reconnect with backoff. */
 function useBackoff(initial = 2000, cap = 30000) {
   const delay = useRef(initial);
   return {
-    next: () => {
-      const d = delay.current;
-      delay.current = Math.min(delay.current * 2, cap);
-      return d;
-    },
+    next: () => { const d = delay.current; delay.current = Math.min(delay.current * 2, cap); return d; },
     reset: () => { delay.current = initial; },
   };
 }
 
+const proxyHlsUrl = (cam: Camera): string | null => {
+  if (!cam.external_id) return null;
+  return `${API_BASE}/api/v1/sentinel/hls/${cam.external_id}/index.m3u8`;
+};
+
 export default function LiveView() {
-  const [cameras, setCameras] = useState<Camera[]>([]);
-  const [layout, setLayout] = useState<LayoutKey>("3x3");
+  const [allCams, setAllCams] = useState<Camera[]>([]);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [layout, setLayout] = useState<LayoutKey>("3×3");
   const [clock, setClock] = useState(new Date());
   const [focus, setFocus] = useState<Camera | null>(null);
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
-    // Only fetch Sentinel cameras (those with real stream_url)
-    api<{ items: Camera[] }>("/cameras?limit=30&status=online")
-      .then((r) => setCameras(r.items.filter(c => c.stream_url)))
+    api<{ items: Camera[] }>("/cameras?limit=100")
+      .then((r) => {
+        const cams = r.items.filter((c) => c.stream_url);
+        setAllCams(cams);
+        setSelected(new Set(cams.slice(0, 9).map((c) => c.id)));
+      })
       .catch(() => undefined);
   }, []);
 
@@ -65,123 +56,144 @@ export default function LiveView() {
   }, []);
 
   const grid = LAYOUTS[layout];
-  const shown = cameras.slice(0, grid);
+  const shown = allCams.filter((c) => selected.has(c.id)).slice(0, grid);
 
-  // Build the proxied HLS URL for a camera — goes through Render backend
-  // which handles Sentinel auth server-side (no cross-origin cookie issue)
-  const proxyHlsUrl = (cam: Camera): string | null => {
-    if (!cam.external_id) return null;
-    return `${API_BASE}/api/v1/sentinel/hls/${cam.external_id}/index.m3u8`;
+  const filtered = allCams.filter((c) =>
+    !search || c.name.toLowerCase().includes(search.toLowerCase()) || (c.city ?? "").toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggle = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < grid) next.add(id);
+      return next;
+    });
+  };
+
+  const GRID_CLASS: Record<LayoutKey, string> = {
+    "2×2": "grid-cols-1 md:grid-cols-2",
+    "3×3": "grid-cols-2 md:grid-cols-3",
+    "4×4": "grid-cols-2 md:grid-cols-4",
   };
 
   return (
-    <div className="space-y-4 max-w-[1400px]">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold">Unified Live View</h1>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Sentinel Grid — {cameras.length} live streams ·{" "}
-            <a
-              href={SENTINEL_PORTAL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-orange-400 hover:underline"
-            >
-              live.sentinelgujarat.in
-            </a>
-          </p>
+    <div className="flex gap-4 max-w-[1600px] animate-fade-in" style={{ height: "calc(100vh - 5.5rem)" }}>
+
+      {/* ── Camera Selector Sidebar ── */}
+      <div className="w-56 shrink-0 card flex flex-col overflow-hidden">
+        <div className="p-3 border-b border-control-800">
+          <div className="text-xs font-semibold text-slate-400 mb-2 flex items-center justify-between">
+            <span>Camera Selector</span>
+            <span className="text-[10px] text-slate-600">{selected.size}/{grid}</span>
+          </div>
+          <div className="relative">
+            <Search size={11} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-600" />
+            <input className="input pl-7 text-xs py-1.5" placeholder="Search…"
+              value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          {(Object.keys(LAYOUTS) as LayoutKey[]).map((k) => (
-            <button
-              key={k}
-              className={`btn ${layout === k ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setLayout(k)}
-            >
-              <Grid3X3 size={13} /> {k}
-            </button>
-          ))}
+
+        <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+          {filtered.map((c) => {
+            const on = selected.has(c.id);
+            const atMax = selected.size >= grid && !on;
+            return (
+              <button
+                key={c.id}
+                disabled={atMax}
+                onClick={() => toggle(c.id)}
+                className={`w-full text-left px-2.5 py-2 rounded-lg text-xs transition-all flex items-start gap-2 ${
+                  on ? "bg-orange-500/15 text-orange-300 border border-orange-500/20"
+                    : atMax ? "opacity-30 cursor-not-allowed text-slate-600"
+                    : "text-slate-400 hover:bg-control-800 hover:text-slate-200"
+                }`}>
+                <div className={`w-1.5 h-1.5 rounded-full mt-0.5 shrink-0 ${c.status === "online" ? "bg-emerald-400" : "bg-red-400"}`} />
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{c.name}</div>
+                  <div className="text-[9px] text-slate-600 font-mono truncate">{c.external_id} · {c.city}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="p-2 border-t border-control-800">
+          <button className="btn-ghost w-full text-xs justify-center py-1.5"
+            onClick={() => setSelected(new Set(allCams.slice(0, grid).map((c) => c.id)))}>
+            Reset to default
+          </button>
         </div>
       </div>
 
-      {focus ? (
-        <div className="card overflow-hidden relative">
-          <button
-            className="absolute top-3 right-3 z-20 btn-ghost text-xs"
-            onClick={() => setFocus(null)}
-          >
-            ← Back to grid
-          </button>
-          <StreamTile camera={focus} big clock={clock} proxyHlsUrl={proxyHlsUrl(focus)} />
-        </div>
-      ) : (
-        <div
-          className={`grid gap-3 ${
-            layout === "2x2"
-              ? "grid-cols-1 md:grid-cols-2"
-              : layout === "3x3"
-              ? "grid-cols-2 md:grid-cols-3"
-              : "grid-cols-2 md:grid-cols-4"
-          }`}
-        >
-          {shown.map((c) => (
-            <StreamTile
-              key={c.id}
-              camera={c}
-              clock={clock}
-              onExpand={() => setFocus(c)}
-              proxyHlsUrl={proxyHlsUrl(c)}
-            />
-          ))}
-          {shown.length === 0 && (
-            <div className="card p-10 text-center text-sm text-slate-500 col-span-full">
-              <MonitorPlay size={28} className="mx-auto mb-2 text-slate-600" />
-              No online cameras found.
-            </div>
-          )}
-        </div>
-      )}
+      {/* ── Main video area ── */}
+      <div className="flex-1 flex flex-col gap-3 min-w-0">
 
-      <p className="text-[11px] text-slate-600">
-        Streams proxied through the IVMS backend (authenticated to Sentinel Grid) ·
-        RTSP: <code className="text-slate-500">rtsp://103.250.160.189:8554/stream/cam01</code> (TCP) ·
-        Direct portal:{" "}
-        <a href={SENTINEL_PORTAL} target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">
-          live.sentinelgujarat.in
-        </a>
-      </p>
+        {/* Toolbar */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="page-title text-lg">Unified Live View</h1>
+            <p className="text-[11px] text-slate-600">
+              {shown.length} streams · HLS proxied · AES-128 decrypted ·{" "}
+              <a href={SENTINEL_PORTAL} target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">
+                live.sentinelgujarat.in ↗
+              </a>
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {(Object.keys(LAYOUTS) as LayoutKey[]).map((k) => (
+              <button key={k} onClick={() => { setLayout(k); setSelected(new Set(allCams.slice(0, LAYOUTS[k]).map((c) => c.id))); }}
+                className={`btn text-xs py-1.5 px-2.5 ${layout === k ? "bg-orange-500/15 text-orange-400 border border-orange-500/25" : "btn-ghost"}`}>
+                {k === "2×2" ? <Grid2X2 size={13} /> : k === "3×3" ? <Grid3X3 size={13} /> : <LayoutGrid size={13} />}
+                {k}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Fullscreen focus view */}
+        {focus ? (
+          <div className="flex-1 relative card overflow-hidden">
+            <button className="absolute top-3 right-3 z-20 btn-ghost text-xs gap-1.5 py-1 px-2"
+              onClick={() => setFocus(null)}>
+              <X size={12} /> Back to grid
+            </button>
+            <StreamTile camera={focus} big clock={clock} proxyUrl={proxyHlsUrl(focus)} />
+          </div>
+        ) : (
+          <div className={`flex-1 grid gap-2 ${GRID_CLASS[layout]}`} style={{ alignContent: "start" }}>
+            {shown.map((c) => (
+              <StreamTile key={c.id} camera={c} clock={clock}
+                onExpand={() => setFocus(c)} proxyUrl={proxyHlsUrl(c)} />
+            ))}
+            {shown.length === 0 && (
+              <div className="card col-span-full p-16 flex flex-col items-center gap-3 text-slate-600">
+                <MonitorPlay size={36} />
+                <div className="text-sm">Select cameras from the sidebar to start streaming</div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 type TileState = "loading" | "playing" | "error" | "no-stream";
 
-function StreamTile({
-  camera,
-  big,
-  clock,
-  onExpand,
-  proxyHlsUrl,
-}: {
-  camera: Camera;
-  big?: boolean;
-  clock: Date;
-  onExpand?: () => void;
-  proxyHlsUrl: string | null;
+function StreamTile({ camera, big, clock, onExpand, proxyUrl }: {
+  camera: Camera; big?: boolean; clock: Date; onExpand?: () => void; proxyUrl: string | null;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoff = useBackoff();
-  // Use the proxied URL first (backend handles auth), fallback to direct CDN
-  const hlsUrl = proxyHlsUrl ?? camera.stream_url;
+  const hlsUrl = proxyUrl ?? camera.stream_url;
   const [state, setState] = useState<TileState>(hlsUrl ? "loading" : "no-stream");
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (!hlsUrl) {
-      setState("no-stream");
-      return;
-    }
+    if (!hlsUrl) { setState("no-stream"); return; }
     const url = hlsUrl;
 
     function attach() {
@@ -189,14 +201,7 @@ function StreamTile({
       setState("loading");
 
       if (Hls.isSupported()) {
-        // hls.js path — Chrome, Firefox, Edge
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          // integration.txt §3: PTS-driven timing, bounded buffer for dashboard
-          maxBufferLength: 8,
-          maxMaxBufferLength: 15,
-        });
+        const hls = new Hls({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 8, maxMaxBufferLength: 15 });
         hlsRef.current = hls;
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -205,17 +210,13 @@ function StreamTile({
           setState("playing");
         });
 
-        // integration.txt §3: reconnect with backoff; never tight-loop.
         hls.on(Hls.Events.ERROR, (_evt, data) => {
-          if (!data.fatal) return; // non-fatal: hls.js self-recovers
-          hls.destroy();
-          hlsRef.current = null;
+          if (!data.fatal) return;
+          hls.destroy(); hlsRef.current = null;
           setState("error");
-          const delay = backoff.next();
-          retryTimer.current = setTimeout(attach, delay);
+          retryTimer.current = setTimeout(attach, backoff.next());
         });
 
-        // integration.txt §3: log decoder warnings, do not treat as fatal.
         hls.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, () => {
           console.debug(`[hls] ${camera.external_id} — init segment parsed`);
         });
@@ -223,15 +224,12 @@ function StreamTile({
         hls.loadSource(url);
         hls.attachMedia(videoRef.current);
       } else if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
-        // Native HLS path — Safari
         videoRef.current.src = url;
         videoRef.current.play().catch(() => undefined);
         setState("playing");
-
         videoRef.current.onerror = () => {
           setState("error");
-          const delay = backoff.next();
-          retryTimer.current = setTimeout(attach, delay);
+          retryTimer.current = setTimeout(attach, backoff.next());
         };
       } else {
         setState("no-stream");
@@ -239,115 +237,83 @@ function StreamTile({
     }
 
     attach();
-
-    return () => {
-      hlsRef.current?.destroy();
-      hlsRef.current = null;
-      if (retryTimer.current) clearTimeout(retryTimer.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { hlsRef.current?.destroy(); hlsRef.current = null; if (retryTimer.current) clearTimeout(retryTimer.current); };
   }, [hlsUrl, camera.external_id]);
 
-  const iconSize = big ? 40 : 22;
+  const copyRtsp = () => {
+    if (camera.rtsp_url) {
+      navigator.clipboard.writeText(camera.rtsp_url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+    }
+  };
 
   return (
-    <div
-      className={`relative bg-black rounded-lg overflow-hidden border border-control-800 aspect-video`}
-    >
-      {/* Real HLS video element */}
+    <div className="video-tile group" onClick={() => !big && onExpand?.()}>
       {camera.stream_url && (
-        <video
-          ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover"
-          muted
-          playsInline
-          autoPlay
-        />
+        <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" muted playsInline autoPlay />
       )}
 
-      {/* Loading / error overlays */}
+      {/* Loading */}
       {state === "loading" && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/70">
-          <Loader2 size={iconSize} className="animate-spin text-orange-400" />
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+          <Loader2 size={big ? 40 : 22} className="animate-spin text-orange-400" />
         </div>
       )}
 
+      {/* Error / reconnecting */}
       {state === "error" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-2">
-          <WifiOff size={iconSize} className="text-red-500" />
+          <WifiOff size={big ? 36 : 20} className="text-red-500" />
           <span className="text-xs text-red-400">Reconnecting…</span>
           {big && (
-            <a
-              href={SENTINEL_PORTAL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[11px] text-orange-400 hover:underline flex items-center gap-1 mt-1"
-            >
+            <a href={SENTINEL_PORTAL} target="_blank" rel="noopener noreferrer"
+              className="text-[11px] text-orange-400 hover:underline flex items-center gap-1 mt-1">
               Open Sentinel Grid <ExternalLink size={10} />
             </a>
           )}
         </div>
       )}
 
+      {/* No stream */}
       {state === "no-stream" && (
-        <div className="absolute inset-0 bg-[linear-gradient(135deg,#0b1120_0%,#1e293b_50%,#0b1120_100%)] flex items-center justify-center">
+        <div className="absolute inset-0 bg-gradient-to-br from-control-950 to-control-800 flex items-center justify-center">
           <div className="text-center px-3">
-            <MonitorPlay className="mx-auto text-slate-700 mb-2" size={iconSize} />
-            <div className={`text-slate-500 font-medium ${big ? "text-sm" : "text-[11px]"}`}>
-              {camera.name}
-            </div>
-            <div className="text-[10px] text-slate-600 mt-1">
-              Departmental VMS — not on Sentinel Grid
-            </div>
+            <MonitorPlay className="mx-auto text-slate-700 mb-2" size={big ? 40 : 20} />
+            <div className={`text-slate-500 font-medium ${big ? "text-sm" : "text-[10px]"}`}>{camera.name}</div>
           </div>
         </div>
       )}
 
-      {/* OSD overlay — top bar */}
-      <div className="absolute top-1.5 left-2 right-2 flex justify-between items-center text-[10px] font-mono z-10">
-        <span className="bg-black/70 px-1.5 py-0.5 rounded text-slate-200 truncate max-w-[70%]">
-          {camera.external_id
-            ? camera.external_id.toUpperCase()
-            : `CAM-${String(camera.id).padStart(3, "0")}`}{" "}
-          {camera.city ? `· ${camera.city}` : ""}
+      {/* Top OSD bar */}
+      <div className="absolute top-0 inset-x-0 h-8 bg-gradient-to-b from-black/80 to-transparent flex items-center px-2 gap-2 z-10">
+        <div className={`w-1.5 h-1.5 rounded-full ${state === "playing" ? "bg-emerald-400 animate-pulse" : state === "error" ? "bg-red-500" : "bg-amber-500"}`} />
+        <span className="font-mono text-[9px] text-slate-200 truncate flex-1">
+          {(camera.external_id ?? "").toUpperCase()} · {camera.name}
         </span>
-        <span className="bg-black/70 px-1.5 py-0.5 rounded text-red-400">
-          ● REC {formatTime(clock.toISOString())}
-        </span>
+        <span className="font-mono text-[9px] text-red-400 shrink-0">● {formatTime(clock.toISOString())}</span>
       </div>
 
-      {/* OSD overlay — bottom bar */}
-      <div className="absolute bottom-1.5 left-2 right-8 flex items-center gap-2 text-[10px] font-mono text-slate-400 z-10">
-        <span>{camera.resolution}</span>
-        {camera.stream_url && (
-          <span className="text-emerald-500">● HLS</span>
-        )}
-        {camera.analytics_tier && (
-          <span className={`${camera.analytics_tier === "A" ? "text-orange-400" : camera.analytics_tier === "B" ? "text-sky-400" : "text-slate-500"}`}>
-            Tier {camera.analytics_tier}
-          </span>
-        )}
+      {/* Bottom OSD bar */}
+      <div className="absolute bottom-0 inset-x-0 h-7 bg-gradient-to-t from-black/80 to-transparent flex items-center px-2 gap-2 z-10">
+        <span className={`text-[9px] font-semibold ${camera.analytics_tier === "A" ? "text-orange-400" : camera.analytics_tier === "B" ? "text-cyan-400" : "text-slate-500"}`}>
+          Tier {camera.analytics_tier}
+        </span>
+        {state === "playing" && <span className="text-[9px] text-emerald-400 font-mono">● HLS LIVE</span>}
+        {camera.resolution && <span className="text-[9px] text-slate-600 font-mono">{camera.resolution}</span>}
+        {camera.city && <span className="text-[9px] text-slate-500 ml-auto truncate">{camera.city}</span>}
       </div>
 
-      {/* Expand + open-stream buttons */}
-      <div className="absolute bottom-1.5 right-2 flex items-center gap-1 z-10">
-        {camera.stream_url && (
-          <a
-            href={camera.stream_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-slate-400 hover:text-white bg-black/50 rounded p-1"
-            title="Open HLS stream in new tab"
-          >
-            <ExternalLink size={11} />
-          </a>
+      {/* Hover controls */}
+      <div className="absolute top-8 right-1.5 flex flex-col gap-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
+        {camera.rtsp_url && (
+          <button onClick={(e) => { e.stopPropagation(); copyRtsp(); }}
+            className="btn-icon w-6 h-6" title="Copy RTSP URL for AI inference">
+            {copied ? <Check size={10} className="text-emerald-400" /> : <Copy size={10} />}
+          </button>
         )}
         {onExpand && (
-          <button
-            onClick={onExpand}
-            className="text-slate-400 hover:text-white bg-black/50 rounded p-1"
-          >
-            <Maximize2 size={11} />
+          <button onClick={(e) => { e.stopPropagation(); onExpand(); }}
+            className="btn-icon w-6 h-6" title="Expand">
+            <Maximize2 size={10} />
           </button>
         )}
       </div>
