@@ -20,9 +20,21 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 | Federation ingest API for edge/regional nodes (adapter contract + API-key) | Model 3 | `POST /api/v1/ingest/anpr`, `POST /api/v1/ingest/detection` |
 | Central analytics: ANPR events, detections, tiering (A/B/C), VAHAN-like registry | Model 4 | `backend/app/routes/{analytics,vehicles}.py` |
 | Watchlist correlation engine → real-time WebSocket alerts | Model 4 | `backend/app/alert_engine.py`, **Live Alerts** page (ack/resolve workflow + sound) |
-| Vehicle search & journey reconstruction (haversine legs, implied speeds, map replay) | plan §7 / §20.2 | **Vehicle Search** page |
+| Face-recognition correlation for wanted/missing persons (Tier A) | plan §6 | `backend/app/alert_engine.py` → `watchlist_person` alerts |
+| Vehicle search & journey reconstruction (haversine legs, implied speeds, map replay, probable OCR matches) | plan §7 / §20.2 | **Vehicle Search** page |
+| Camera health monitoring (time-series health log, feeds/status) | plan §9.1 / §13 | `GET /cameras/{id}/health-log`, `/feeds/status` |
+| GIS coverage + gap analysis report | plan §9.2 / §13 | `GET /cameras/geo/coverage`, `/cameras/gap-analysis` |
+| Federation connector registry | plan §11.2 | `GET /system/adapters` |
 | Demo simulator (edge-node emulation) — makes the deployed product live-demoable | plan §20 | `backend/app/simulator.py` |
-| JWT + RBAC auth, PBKDF2 password hashing | plan §17 | `backend/app/security.py` |
+| JWT + RBAC auth, PBKDF2 password hashing, user management | plan §17 | `backend/app/security.py`, `routes/users.py` |
+
+## Deliverables (plan §21)
+
+- **HLD** — [docs/HLD.md](docs/HLD.md)
+- **Solution presentation (20-slide PDF)** — [docs/PRESENTATION.pdf](docs/PRESENTATION.pdf) (regenerate: `python docs/generate_presentation.py`)
+- **Demo script (2–3 min, plan §20.2 test scenario)** — [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)
+- **Deployment guide** — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- **This repository** with full code + docker-compose + deploy configs
 
 ## Quick start (zero-config dev)
 

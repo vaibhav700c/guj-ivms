@@ -27,6 +27,15 @@ cd frontend
 vercel link
 vercel env add VITE_API_URL production    # https://guj-ivms-api.onrender.com
 vercel env add VITE_WS_URL production     # wss://guj-ivms-api.onrender.com
+```
+
+> **Root directory:** the project must use **`frontend`** as its Root Directory
+> (set via `vercel project` settings or dashboard Settings → General).
+> In this repo it was configured through the Vercel API; git pushes to `master`
+> auto-deploy after that.
+
+```bash
+vercel git connect https://github.com/vaibhav700c/guj-ivms   # enable auto-deploy
 vercel --prod
 ```
 
