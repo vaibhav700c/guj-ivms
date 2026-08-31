@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env & secrets
+.env
+.env.local
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# App data
+snapshots/

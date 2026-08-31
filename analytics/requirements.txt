@@ -1,0 +1,8 @@
+# Optional — only needed to run the real ML analytics worker against
+# live RTSP streams. The cloud deployment (Render/Vercel) does not install this.
+# opencv-python-headless
+# ultralytics            # YOLOv8 detection
+# paddleocr paddlepaddle # Indian plate OCR
+# onnxruntime            # SCRFD/ArcFace via insightface export
+# bytetrack              # multi-object tracking
+httpx>=0.28.1

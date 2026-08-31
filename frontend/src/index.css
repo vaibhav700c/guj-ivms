@@ -1,0 +1,66 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-control-950 text-slate-200 font-sans antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-control-900;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-control-700 rounded;
+}
+
+@layer components {
+  .card {
+    @apply bg-control-900 border border-control-800 rounded-xl shadow-lg;
+  }
+  .card-header {
+    @apply flex items-center justify-between px-4 py-3 border-b border-control-800;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-orange-600 hover:bg-orange-500 text-white;
+  }
+  .btn-ghost {
+    @apply btn bg-control-800 hover:bg-control-700 text-slate-300;
+  }
+  .input {
+    @apply bg-control-950 border border-control-700 rounded-lg px-3 py-2 text-sm text-slate-200
+      placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-orange-600/50 w-full;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold;
+  }
+  .table-head {
+    @apply px-3 py-2.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-400;
+  }
+  .table-cell {
+    @apply px-3 py-2.5 text-sm text-slate-300;
+  }
+}
+
+/* Leaflet dark tweaks */
+.leaflet-container {
+  background: #0f172a;
+  font-family: Inter, system-ui, sans-serif;
+}
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: #1e293b;
+  color: #e2e8f0;
+}

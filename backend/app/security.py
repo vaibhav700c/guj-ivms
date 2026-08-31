@@ -1,0 +1,97 @@
+"""Authentication — JWT tokens + PBKDF2 password hashing (stdlib, no native deps)."""
+import hashlib
+import os
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.db import get_db
+from app.models import User
+
+_bearer = HTTPBearer(auto_error=False)
+
+# ---------- password hashing (PBKDF2-SHA256, 390k iterations) ----------
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 390_000)
+    return f"pbkdf2_sha256$390000${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        _, iters, salt_hex, dk_hex = hashed.split("$")
+        dk = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iters)
+        )
+        return dk.hex() == dk_hex
+    except Exception:
+        return False
+
+
+# ---------- JWT ----------
+
+
+def create_access_token(user: User) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+    payload = {
+        "sub": user.username,
+        "role": user.role,
+        "uid": user.id,
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
+        )
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Returns the authenticated user, or None when auth is disabled/demo mode."""
+    if not settings.REQUIRE_AUTH:
+        return None
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+        )
+    payload = decode_token(credentials.credentials)
+    user = db.query(User).filter(User.username == payload.get("sub")).first()
+    if user is None or not user.active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found"
+        )
+    return user
+
+
+def require_roles(*roles: str):
+    """Dependency factory — restrict endpoint to given roles (when auth enabled)."""
+
+    def _checker(user: User | None = Depends(get_current_user)) -> User | None:
+        if settings.REQUIRE_AUTH and user is not None and user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions"
+            )
+        return user
+
+    return _checker

@@ -1,0 +1,12 @@
+# MediaMTX — RTSP → WebRTC/HLS relay (full local stack)
+# Cameras publish to rtsp://mediamtx:8554/<name>, browsers consume
+# WebRTC (http://localhost:8889/<name>) or HLS (http://localhost:8888/<name>).
+
+logLevel: info
+protocols: [webrtc, hls]
+
+paths:
+  # Sentinel grid cameras are registered here by feed_manager in production.
+  # Demo placeholder:
+  demo:
+    source: publisher

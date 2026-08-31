@@ -1,0 +1,35 @@
+# Render Blueprint — deploys the backend + managed PostgreSQL.
+# In Render dashboard: New → Blueprint → point at this repository.
+services:
+  - type: web
+    name: guj-ivms-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: guj-ivms-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        sync: false # set to your Vercel frontend URL
+      - key: SECRET_KEY
+        generateValue: true
+      - key: REQUIRE_AUTH
+        value: "false" # set "true" to enforce JWT on all APIs
+      - key: SIMULATOR_AUTO_START
+        value: "true" # demo event generation; set "false" for real ingest
+      - key: INGEST_API_KEY
+        generateValue: true
+      - key: SEED_ON_STARTUP
+        value: "true"
+
+databases:
+  - name: guj-ivms-db
+    plan: free
+    databaseName: guj_ivms
+    user: ivms
