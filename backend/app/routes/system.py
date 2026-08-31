@@ -89,15 +89,15 @@ def reseed(
     dialect = db.bind.dialect.name
     if dialect == "postgresql":
         db.execute(text(
-            "TRUNCATE TABLE alerts, anpr_events, detection_events, "
-            "cameras, watchlist_entries, vehicle_records, users, departments "
+            "TRUNCATE TABLE alerts, anpr_events, detection_events, camera_health_log, "
+            "cameras, watchlist, vehicle_records, users, departments "
             "RESTART IDENTITY CASCADE"
         ))
     else:
         # SQLite: delete in FK order
         for tbl in [
-            "alerts", "anpr_events", "detection_events",
-            "cameras", "watchlist_entries", "vehicle_records", "users", "departments",
+            "alerts", "anpr_events", "detection_events", "camera_health_log",
+            "cameras", "watchlist", "vehicle_records", "users", "departments",
         ]:
             db.execute(text(f"DELETE FROM {tbl}"))
     db.commit()
