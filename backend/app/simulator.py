@@ -128,6 +128,10 @@ class Simulator:
                 random.choices(["person", "vehicle", "crowd"], weights=[5, 4, 1])[0]
             )
             name = random.choice(PERSON_NAMES) if event_type in ("face", "person") else None
+            # Bias face events toward watchlisted persons so face-recognition
+            # correlation alerts surface reliably in the demo (plan §6).
+            if event_type == "face" and random.random() < 0.55:
+                name = random.choice(PERSON_NAMES[:2])  # Rakesh P. / Mohan L.
             det = DetectionEvent(
                 camera_id=det_cam.id,
                 event_type=event_type,
