@@ -28,6 +28,37 @@ def _registry_query(db: Session, norm: str):
     ).first()
 
 
+@router.get("")
+def list_vehicles(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """List all VAHAN-like vehicle registry records (plan §19.2)."""
+    total = db.query(VehicleRecord).count()
+    records = db.query(VehicleRecord).offset(offset).limit(limit).all()
+    return {
+        "total": total,
+        "items": [_vr_item(r) for r in records],
+    }
+
+
+def _vr_item(r: VehicleRecord) -> dict:
+    return {
+        "registration_number": r.registration_number,
+        "owner_name": r.owner_name,
+        "vehicle_class": r.vehicle_class,
+        "maker": r.maker,
+        "model": r.model,
+        "color": r.color,
+        "fuel_type": r.fuel_type,
+        "rto_code": r.rto_code,
+        "rto_name": r.rto_name,
+        "insurance_valid_till": r.insurance_valid_till,
+        "fitness_valid_till": r.fitness_valid_till,
+    }
+
+
 @router.get("/search/{plate}")
 def search_vehicle(plate: str, db: Session = Depends(get_db)):
     """Full timeline for a plate: registry + all ANPR sightings + journey legs."""

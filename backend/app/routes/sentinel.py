@@ -46,20 +46,37 @@ async def _get_sentinel_cookie() -> str:
     if not settings.SENTINEL_PASSWORD:
         raise HTTPException(503, "SENTINEL_PASSWORD not configured — contact admin")
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+    # Do NOT follow redirects — the login endpoint returns 302 with Set-Cookie;
+    # following the redirect causes httpx to lose the cookie.
+    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
         resp = await client.post(
             f"{settings.SENTINEL_HLS_BASE}/auth/login",
             data={"password": settings.SENTINEL_PASSWORD},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        # Successful login returns 302 with Set-Cookie
         cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
+        if not cookie and resp.status_code == 302:
+            # Try reading from raw Set-Cookie header as fallback
+            raw_cookie = resp.headers.get("set-cookie", "")
+            if SENTINEL_COOKIE_NAME in raw_cookie:
+                # Parse out just the value: sentinel=<value>;
+                for part in raw_cookie.split(";"):
+                    part = part.strip()
+                    if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
+                        cookie = part.split("=", 1)[1]
+                        break
         if not cookie:
-            raise HTTPException(502, "Sentinel auth failed — invalid password")
+            raise HTTPException(
+                502,
+                f"Sentinel auth failed — status {resp.status_code}, no cookie returned. "
+                "Check SENTINEL_PASSWORD env var on Render."
+            )
 
     _cached_cookie = cookie
     _cookie_fetched_at = time.time()
-    logger.info("Sentinel session refreshed")
-    return cookie
+    logger.info("Sentinel session refreshed (HTTP %d)", resp.status_code)
+    return _cached_cookie
 
 
 def _build_stream_info(cam_id: str) -> dict:
