@@ -1,11 +1,11 @@
 """System routes — health, config, adapter status (plan §13 /system)."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import Camera
+from app.models import Camera, Department, User, VehicleRecord, WatchlistEntry
 from app.security import get_current_user
 from app.simulator import simulator
 
@@ -68,4 +68,40 @@ def adapter_status(db: Session = Depends(get_db)):
             "POST /api/v1/ingest/anpr",
             "POST /api/v1/ingest/detection",
         ],
+    }
+
+
+@router.post("/reseed")
+def reseed(
+    secret: str,
+    db: Session = Depends(get_db),
+):
+    """Drop and re-seed cameras, users, vehicles, and watchlist.
+    Protected by INGEST_API_KEY — do not expose to the public."""
+    expected = settings.INGEST_API_KEY or ""
+    if not expected or secret != expected:
+        raise HTTPException(403, "Invalid secret")
+
+    from app.models import ANPREvent, Alert, DetectionEvent
+    from app.seed import seed
+
+    # Clear in FK order
+    db.query(Alert).delete()
+    db.query(ANPREvent).delete()
+    db.query(DetectionEvent).delete()
+    db.query(Camera).delete()
+    db.query(WatchlistEntry).delete()
+    db.query(VehicleRecord).delete()
+    db.query(User).delete()
+    db.query(Department).delete()
+    db.commit()
+
+    seed(db)
+
+    return {
+        "status": "reseeded",
+        "cameras": db.query(Camera).count(),
+        "vehicles": db.query(VehicleRecord).count(),
+        "watchlist": db.query(WatchlistEntry).count(),
+        "users": db.query(User).count(),
     }
