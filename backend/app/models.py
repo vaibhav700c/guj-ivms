@@ -191,3 +191,19 @@ class User(Base):
     department: Mapped[str | None] = mapped_column(String(200), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CameraHealthLog(Base):
+    """Time-series camera health samples (plan §9.1 camera_health_log)."""
+
+    __tablename__ = "camera_health_log"
+    __table_args__ = (Index("ix_chl_camera_time", "camera_id", "time"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    camera_id: Mapped[int] = mapped_column(ForeignKey("cameras.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20))
+    fps_actual: Mapped[float | None] = mapped_column(Float, nullable=True)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    packet_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

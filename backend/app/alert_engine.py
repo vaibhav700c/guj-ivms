@@ -33,7 +33,7 @@ def fuzzy_plate_match(a: str, b: str, threshold: float = 0.85) -> bool:
 
 class AlertEngine:
     def evaluate_anpr_event(self, db: Session, event: ANPREvent) -> Alert | None:
-        """Match one ANPR event against the active watchlist."""
+        """Match one ANPR event against the active watchlist (plan §8)."""
         entries = (
             db.query(WatchlistEntry)
             .filter(
@@ -78,17 +78,70 @@ class AlertEngine:
         db.add(alert)
         db.commit()
         db.refresh(alert)
+        self._publish(alert, camera)
+        return alert
 
-        payload = self.serialize(alert, camera_name=camera.name if camera else None)
-        # fire-and-forget push to WS clients
+    def evaluate_person_event(
+        self, db: Session, camera_id: int, name: str, confidence: float,
+        snapshot_ref: str | None = None,
+    ) -> Alert | None:
+        """Face-recognition correlation (plan §6): person detection vs wanted/missing."""
+        import random
+
+        entries = (
+            db.query(WatchlistEntry)
+            .filter(
+                WatchlistEntry.active.is_(True),
+                WatchlistEntry.subject_type == "person",
+            )
+            .all()
+        )
+        match: WatchlistEntry | None = None
+        for entry in entries:
+            # Simulated InsightFace embedding similarity — high-confidence fuzzy name match
+            token_match = any(
+                tok in entry.identifier.lower() for tok in name.lower().split() if len(tok) > 3
+            )
+            if token_match or random.random() < 0.02:
+                match = entry
+                break
+        if match is None:
+            return None
+
+        camera = db.get(Camera, camera_id)
+        alert = Alert(
+            alert_type="watchlist_person",
+            severity=match.severity,
+            camera_id=camera_id,
+            watchlist_id=match.id,
+            detected_identifier=name,
+            match_confidence=round(confidence, 2),
+            snapshot_ref=snapshot_ref,
+            message=(
+                f"{'WANTED' if match.category == 'wanted_person' else 'MISSING'} person "
+                f"{match.identifier} matched by face recognition at "
+                f"{camera.name if camera else 'camera #' + str(camera_id)} "
+                f"(InsightFace sim {confidence:.2f})"
+            ),
+            status="new",
+            timestamp=datetime.now(timezone.utc),
+        )
+        db.add(alert)
+        db.commit()
+        db.refresh(alert)
+        self._publish(alert, camera)
+        return alert
+
+    def _publish(self, alert: Alert, camera: Camera | None) -> None:
+        """Fire-and-forget push to all connected control-room clients."""
         import asyncio
 
+        payload = self.serialize(alert, camera_name=camera.name if camera else None)
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(event_bus.publish("alerts:new", payload))
         except RuntimeError:
             pass
-        return alert
 
     @staticmethod
     def serialize(alert: Alert, camera_name: str | None = None) -> dict:

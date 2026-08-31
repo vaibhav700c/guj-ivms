@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from app.alert_engine import alert_engine, normalize_plate
 from app.config import settings
 from app.db import SessionLocal
-from app.models import ANPREvent, Camera, DetectionEvent, WatchlistEntry
+from app.eventbus import event_bus
+from app.models import ANPREvent, Camera, CameraHealthLog, DetectionEvent
 from app.seed_data import COLORS, VEHICLE_TYPES
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,12 @@ WATCHLIST_PLATES = [
     "GJ 03 EF 9012",
     "GJ 18 GH 3456",
     "GJ 01 JK 7890",
+]
+
+PERSON_NAMES = [
+    "Rakesh P.",  # wanted person (watchlist) — triggers face-recognition alerts
+    "Mohan L.",   # missing person (watchlist)
+    "Jayesh V.", "Nitin S.", "Harsh B.", "Kunal M.", "Omkar T.", "Sagar D.",
 ]
 
 
@@ -110,27 +117,65 @@ class Simulator:
         if alert:
             self.stats["alerts_generated"] += 1
 
-        # 2) Occasional generic detection event
+        # 2) Generic detection + occasional face-recognition events (Tier A cameras)
         if random.random() < 0.5:
+            det_cam = random.choice(cameras)
+            is_tier_a = det_cam.analytics_tier == "A"
+            event_type = (
+                random.choices(["person", "vehicle", "crowd", "face"],
+                               weights=[4, 3, 1, 6 if is_tier_a else 0])[0]
+                if is_tier_a else
+                random.choices(["person", "vehicle", "crowd"], weights=[5, 4, 1])[0]
+            )
+            name = random.choice(PERSON_NAMES) if event_type in ("face", "person") else None
             det = DetectionEvent(
-                camera_id=random.choice(cameras).id,
-                event_type=random.choices(
-                    ["person", "vehicle", "crowd"], weights=[5, 4, 1]
-                )[0],
+                camera_id=det_cam.id,
+                event_type=event_type,
                 track_id=f"trk-{random.randint(10000, 99999)}",
                 confidence=round(random.uniform(0.7, 0.97), 2),
                 bbox={"x": random.randint(0, 800), "y": random.randint(0, 400),
                       "w": random.randint(40, 220), "h": random.randint(60, 320)},
+                metadata_json={
+                    "face_name": name,
+                    "embedding_stub": [round(random.uniform(-1, 1), 3) for _ in range(8)],
+                } if event_type == "face" else {},
                 timestamp=datetime.now(timezone.utc),
             )
             db.add(det)
             db.commit()
+            db.refresh(det)
 
-        # 3) Camera health heartbeat
+            # Face recognition correlation → watchlist person alerts (plan §6)
+            if event_type == "face" and name:
+                alert_engine.evaluate_person_event(
+                    db, det_cam.id, name, det.confidence,
+                    snapshot_ref=f"snapshots/{det_cam.id}/face-{det.id}.jpg",
+                )
+
+            # Live analytics overlay (plan §13 /ws/analytics)
+            analytics_payload = {
+                "type": "detection",
+                "camera_id": det_cam.id,
+                "camera_name": det_cam.name,
+                "event_type": event_type,
+                "confidence": det.confidence,
+                "timestamp": det.timestamp.isoformat(),
+            }
+            asyncio.create_task(event_bus.publish("analytics:new", analytics_payload))
+
+        # 3) Camera health heartbeat + time-series health log (plan §9.1)
         cam = camera
         cam.last_seen = datetime.now(timezone.utc)
         if cam.status == "online":
             cam.health_score = round(min(1.0, (cam.health_score or 0.9) + random.uniform(-0.02, 0.02)), 2)
+        db.add(CameraHealthLog(
+            camera_id=cam.id,
+            status=cam.status,
+            fps_actual=round(random.uniform(cam.fps * 0.85, cam.fps), 1) if cam.fps and cam.status == "online" else 0.0,
+            latency_ms=round(random.uniform(40, 240), 1) if cam.status == "online" else round(random.uniform(400, 1500), 1),
+            packet_loss=round(random.uniform(0, 0.03), 4) if cam.status == "online" else round(random.uniform(0.05, 0.4), 4),
+            error_message=None if cam.status == "online" else "stream unreachable / RTSP timeout",
+        ))
         db.commit()
 
     def status(self) -> dict:

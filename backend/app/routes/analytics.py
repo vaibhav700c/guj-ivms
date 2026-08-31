@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.alert_engine import normalize_plate
 from app.db import get_db
 from app.models import ANPREvent, Camera, DetectionEvent, VehicleRecord, WatchlistEntry
 
@@ -67,3 +68,133 @@ def tier_coverage(db: Session = Depends(get_db)):
     return [
         {"tier": t, "count": c, "description": descriptions.get(t, "")} for t, c in rows
     ]
+
+
+@router.get("/anpr")
+def anpr_events(
+    camera_id: int | None = None,
+    plate: str | None = None,
+    vehicle_type: str | None = None,
+    hours: float = 24.0,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """ANPR detections with filters (plan §13 analytics/anpr)."""
+    from datetime import datetime, timedelta, timezone
+
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    q = db.query(ANPREvent).filter(ANPREvent.timestamp >= since)
+    if camera_id:
+        q = q.filter(ANPREvent.camera_id == camera_id)
+    if vehicle_type:
+        q = q.filter(ANPREvent.vehicle_type == vehicle_type)
+    if plate:
+        q = q.filter(ANPREvent.plate_normalized.contains(normalize_plate(plate)))
+    total = q.count()
+    events = q.order_by(ANPREvent.timestamp.desc()).offset(offset).limit(limit).all()
+    return {"total": total, "items": [_anpr_item(e) for e in events]}
+
+
+def _anpr_item(e: ANPREvent) -> dict:
+    return {
+        "id": e.id,
+        "camera_id": e.camera_id,
+        "camera_name": e.camera.name if e.camera else None,
+        "city": e.camera.city if e.camera else None,
+        "plate_text": e.plate_text,
+        "plate_normalized": e.plate_normalized,
+        "vehicle_type": e.vehicle_type,
+        "vehicle_color": e.vehicle_color,
+        "direction": e.direction,
+        "confidence": e.confidence,
+        "ocr_confidence": e.ocr_confidence,
+        "snapshot_ref": e.snapshot_ref,
+        "timestamp": e.timestamp.isoformat(),
+    }
+
+
+@router.get("/anpr/search")
+def anpr_search(plate: str, limit: int = 50, db: Session = Depends(get_db)):
+    """Search ANPR detections by plate number (plan §13 analytics/anpr/search)."""
+    norm = normalize_plate(plate)
+    events = (
+        db.query(ANPREvent)
+        .filter(ANPREvent.plate_normalized.contains(norm))
+        .order_by(ANPREvent.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"query": plate, "total": len(events), "items": [_anpr_item(e) for e in events]}
+
+
+@router.get("/faces")
+def face_events(limit: int = 50, db: Session = Depends(get_db)):
+    """Face detection events from Tier A cameras (plan §6 / §13 analytics/faces)."""
+    from app.models import DetectionEvent
+
+    events = (
+        db.query(DetectionEvent)
+        .filter(DetectionEvent.event_type == "face")
+        .order_by(DetectionEvent.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"total": len(events), "items": [
+        {
+            "id": d.id,
+            "camera_id": d.camera_id,
+            "camera_name": d.metadata_json.get("camera_name"),
+            "face_name": d.metadata_json.get("face_name"),
+            "embedding_dims": len(d.metadata_json.get("embedding_stub", [])),
+            "confidence": d.confidence,
+            "bbox": d.bbox,
+            "timestamp": d.timestamp.isoformat(),
+        }
+        for d in events
+    ]}
+
+
+@router.get("/traffic")
+def traffic_density(db: Session = Depends(get_db)):
+    """Traffic density per camera (plan §13 analytics/traffic)."""
+    rows = (
+        db.query(Camera, func.count(ANPREvent.id).label("cnt"))
+        .outerjoin(ANPREvent, ANPREvent.camera_id == Camera.id)
+        .group_by(Camera.id)
+        .all()
+    )
+    items = [
+        {"camera_id": c.id, "name": c.name, "city": c.city,
+         "lat": c.latitude, "lng": c.longitude, "events": cnt}
+        for c, cnt in rows
+    ]
+    items.sort(key=lambda x: -x["events"])
+    max_events = max((i["events"] for i in items), default=0) or 1
+    for i in items:
+        i["density"] = round(i["events"] / max_events, 3)
+    return {"total": len(items), "items": items}
+
+
+@router.get("/events")
+def generic_events(limit: int = 100, event_type: str | None = None,
+                   db: Session = Depends(get_db)):
+    """Generic detection event stream (plan §13 analytics/events)."""
+    from app.models import DetectionEvent
+
+    q = db.query(DetectionEvent)
+    if event_type:
+        q = q.filter(DetectionEvent.event_type == event_type)
+    events = q.order_by(DetectionEvent.timestamp.desc()).limit(limit).all()
+    return {"total": len(events), "items": [
+        {
+            "id": d.id,
+            "camera_id": d.camera_id,
+            "event_type": d.event_type,
+            "track_id": d.track_id,
+            "confidence": d.confidence,
+            "bbox": d.bbox,
+            "timestamp": d.timestamp.isoformat(),
+        }
+        for d in events
+    ]}

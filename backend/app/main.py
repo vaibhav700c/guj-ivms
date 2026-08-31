@@ -13,9 +13,13 @@ from app.routes import (
     analytics,
     auth,
     cameras,
+    departments,
+    feeds,
     ingest,
     reports,
     simulator as simulator_routes,
+    system,
+    users,
     vehicles,
     watchlist,
     ws,
@@ -75,6 +79,10 @@ app.include_router(vehicles.router, prefix=API)
 app.include_router(reports.router, prefix=API)
 app.include_router(ingest.router, prefix=API)
 app.include_router(simulator_routes.router, prefix=API)
+app.include_router(departments.router, prefix=API)
+app.include_router(feeds.router, prefix=API)
+app.include_router(system.router, prefix=API)
+app.include_router(users.router, prefix=API)
 app.include_router(ws.router)
 
 

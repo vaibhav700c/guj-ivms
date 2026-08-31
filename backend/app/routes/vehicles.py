@@ -40,6 +40,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
         .all()
     )
     sightings = []
+    probable = []
     for e in events:
         cam = e.camera
         sightings.append({
@@ -56,6 +57,35 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
             "vehicle_color": e.vehicle_color,
             "snapshot_ref": e.snapshot_ref,
         })
+
+    # Probable (OCR-tolerant) matches — plan §20.2 step 5 (ReID/fuzzy fallback)
+    from difflib import SequenceMatcher
+
+    other_events = (
+        db.query(ANPREvent)
+        .filter(ANPREvent.plate_normalized != norm)
+        .order_by(ANPREvent.timestamp.desc())
+        .limit(500)
+        .all()
+    )
+    seen_plates: set[str] = set()
+    for e in other_events:
+        if e.plate_normalized in seen_plates:
+            continue
+        ratio = SequenceMatcher(None, norm, e.plate_normalized).ratio()
+        if ratio >= 0.85:
+            seen_plates.add(e.plate_normalized)
+            cam = e.camera
+            probable.append({
+                "plate_text": e.plate_text,
+                "similarity": round(ratio, 2),
+                "camera_name": cam.name if cam else None,
+                "lat": cam.latitude if cam else None,
+                "lng": cam.longitude if cam else None,
+                "city": cam.city if cam else None,
+                "timestamp": e.timestamp.isoformat() if e.timestamp else None,
+                "confidence": e.confidence,
+            })
 
     # Journey legs: distance, elapsed time, implied speed between consecutive sightings
     legs, total_km = [], 0.0
@@ -100,7 +130,51 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
         "total_distance_km": round(total_km, 2),
         "cities_visited": cities,
         "sightings": sightings,
+        "probable_matches": probable,
         "legs": legs,
+    }
+
+
+@router.get("/journey/{plate}")
+def journey_reconstruction(plate: str, db: Session = Depends(get_db)):
+    """Reconstructed route with GIS — alias for full search (plan §13 vehicles/journey)."""
+    data = search_vehicle(plate, db)
+    return {
+        "plate": data["plate"],
+        "journey_start": data["sightings"][0]["timestamp"] if data["sightings"] else None,
+        "journey_end": data["sightings"][-1]["timestamp"] if data["sightings"] else None,
+        "waypoints": data["sightings"],
+        "total_cameras": len(data["sightings"]),
+        "total_distance_km": data["total_distance_km"],
+        "cities_visited": data["cities_visited"],
+        "probable_matches": data["probable_matches"],
+    }
+
+
+@router.get("/last-seen/{plate}")
+def last_seen(plate: str, db: Session = Depends(get_db)):
+    """Most recent sighting of a plate (plan §13 vehicles/last-seen)."""
+    norm = normalize_plate(plate)
+    event = (
+        db.query(ANPREvent)
+        .filter(ANPREvent.plate_normalized == norm)
+        .order_by(ANPREvent.timestamp.desc())
+        .first()
+    )
+    if not event:
+        raise HTTPException(404, "No sightings recorded for this plate")
+    cam = event.camera
+    return {
+        "plate": event.plate_text,
+        "camera_id": event.camera_id,
+        "camera_name": cam.name if cam else None,
+        "city": cam.city if cam else None,
+        "lat": cam.latitude if cam else None,
+        "lng": cam.longitude if cam else None,
+        "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+        "direction": event.direction,
+        "confidence": event.confidence,
+        "snapshot_ref": event.snapshot_ref,
     }
 
 
