@@ -16,10 +16,20 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 def overview(db: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     day_ago = now - timedelta(hours=24)
+    total = db.query(Camera).count()
+    online = db.query(Camera).filter(Camera.status == "online").count()
+    offline = db.query(Camera).filter(Camera.status == "offline").count()
+    sentinel_total = db.query(Camera).filter(Camera.vms_vendor == "Sentinel Grid").count()
+    sentinel_online = db.query(Camera).filter(
+        Camera.vms_vendor == "Sentinel Grid", Camera.status == "online"
+    ).count()
     return {
-        "cameras_total": db.query(Camera).count(),
-        "cameras_online": db.query(Camera).filter(Camera.status == "online").count(),
-        "cameras_offline": db.query(Camera).filter(Camera.status == "offline").count(),
+        "cameras_total": total,
+        "cameras_online": online,
+        "cameras_offline": offline,
+        "cameras_maintenance": db.query(Camera).filter(Camera.status == "maintenance").count(),
+        "sentinel_cameras_total": sentinel_total,
+        "sentinel_cameras_online": sentinel_online,
         "anpr_events_24h": db.query(ANPREvent).filter(ANPREvent.timestamp >= day_ago).count(),
         "anpr_events_total": db.query(ANPREvent).count(),
         "detections_24h": db.query(DetectionEvent).filter(DetectionEvent.timestamp >= day_ago).count(),

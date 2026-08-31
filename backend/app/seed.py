@@ -1,7 +1,7 @@
 """Database seeding — idempotent, safe to run on every startup.
 
-30 cameras map directly to the live Sentinel Grid (real HLS/RTSP/WHEP streams).
-20 additional departmental cameras represent VMS nodes not yet on the Sentinel Grid.
+30 cameras — all real Sentinel Grid cameras from cameras.json.
+Only real data; no fake/departmental placeholders.
 """
 import logging
 import random
@@ -9,7 +9,7 @@ import random
 from sqlalchemy.orm import Session
 
 from app.models import Camera, Department, User, VehicleRecord, WatchlistEntry
-from app.seed_data import DEPARTMENTAL_CAMERAS, SENTINEL_CAMERAS
+from app.seed_data import SENTINEL_CAMERAS
 from app.security import hash_password
 from app.seed_watchlist import VAHAN_RECORDS, WATCHLIST
 
@@ -45,7 +45,7 @@ def seed(db: Session) -> None:
     if db.query(Camera).count() == 0:
         cameras = []
 
-        # 30 real Sentinel Grid cameras
+        # 30 real Sentinel Grid cameras — these are the ONLY cameras
         sentinel_statuses = ["online"] * 27 + ["offline"] * 2 + ["maintenance"]
         for i, (sid, name, city, district, lat, lng, ctype, tier, road) in enumerate(SENTINEL_CAMERAS):
             status = sentinel_statuses[i % len(sentinel_statuses)]
@@ -76,46 +76,14 @@ def seed(db: Session) -> None:
                 analytics_tier=tier,
                 analytics_config={
                     "fps_target": 5 if tier == "A" else 2,
-                    "rtsp_transport": "tcp",  # §3 of integration.txt — always force TCP
+                    "rtsp_transport": "tcp",
                     "sentinel_id": sid,
                 },
             ))
 
-        # 20 departmental cameras (not on Sentinel Grid yet)
-        dept_statuses = ["online"] * 16 + ["offline"] * 2 + ["maintenance"] * 2
-        for i, (name, city, district, lat, lng, ctype, tier, road) in enumerate(DEPARTMENTAL_CAMERAS):
-            status = dept_statuses[i % len(dept_statuses)]
-            city_dept = dept_for_city.get(city)
-            cameras.append(Camera(
-                external_id=f"DEPT-{city[:3].upper()}-{2000 + i}",
-                department_id=dept_by_code[city_dept] if city_dept else dept_by_code["GSHP"],
-                name=name,
-                latitude=lat + random.uniform(-0.0003, 0.0003),
-                longitude=lng + random.uniform(-0.0003, 0.0003),
-                address=road,
-                city=city,
-                district=district,
-                camera_type=ctype,
-                codec="h265" if tier == "A" else "h264",
-                resolution="1080p" if tier != "C" else "720p",
-                fps=25 if tier == "A" else 15,
-                has_ir=tier != "C",
-                has_ptz=False,
-                stream_url=None,   # departmental — not yet on Sentinel Grid
-                rtsp_url=None,
-                whep_url=None,
-                stream_protocol=None,
-                vms_vendor="Departmental VMS",
-                status=status,
-                health_score=0.94 if status == "online" else (0.3 if status == "offline" else 0.65),
-                analytics_tier=tier,
-                analytics_config={"fps_target": 5 if tier == "A" else 2},
-            ))
-
         db.add_all(cameras)
         db.commit()
-        logger.info("Seeded %d cameras (%d Sentinel Grid + %d departmental)",
-                    len(cameras), len(SENTINEL_CAMERAS), len(DEPARTMENTAL_CAMERAS))
+        logger.info("Seeded %d Sentinel Grid cameras", len(cameras))
 
     # ── Watchlist ─────────────────────────────────────────────────────────────
     if db.query(WatchlistEntry).count() == 0:

@@ -7,8 +7,12 @@ import {
   Loader2,
   ExternalLink,
   Grid3X3,
+  Play,
 } from "lucide-react";
 import { api, formatTime } from "../lib/api";
+
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
+const SENTINEL_PORTAL = "https://live.sentinelgujarat.in";
 
 interface Camera {
   id: number;
@@ -16,9 +20,9 @@ interface Camera {
   name: string;
   city: string | null;
   status: string;
-  stream_url: string | null;    // HLS (CDN)
-  rtsp_url: string | null;      // RTSP direct
-  whep_url: string | null;      // WebRTC/WHEP
+  stream_url: string | null;    // HLS CDN (direct, requires browser auth)
+  rtsp_url: string | null;
+  whep_url: string | null;
   stream_protocol: string | null;
   resolution: string | null;
   analytics_tier: string;
@@ -49,16 +53,9 @@ export default function LiveView() {
   const [focus, setFocus] = useState<Camera | null>(null);
 
   useEffect(() => {
+    // Only fetch Sentinel cameras (those with real stream_url)
     api<{ items: Camera[] }>("/cameras?limit=30&status=online")
-      .then((r) => {
-        // Prefer Sentinel Grid cameras (those with real stream_url) first
-        const sorted = [...r.items].sort((a, b) => {
-          if (a.stream_url && !b.stream_url) return -1;
-          if (!a.stream_url && b.stream_url) return 1;
-          return 0;
-        });
-        setCameras(sorted);
-      })
+      .then((r) => setCameras(r.items.filter(c => c.stream_url)))
       .catch(() => undefined);
   }, []);
 
@@ -70,20 +67,27 @@ export default function LiveView() {
   const grid = LAYOUTS[layout];
   const shown = cameras.slice(0, grid);
 
+  // Build the proxied HLS URL for a camera — goes through Render backend
+  // which handles Sentinel auth server-side (no cross-origin cookie issue)
+  const proxyHlsUrl = (cam: Camera): string | null => {
+    if (!cam.external_id) return null;
+    return `${API_BASE}/api/v1/sentinel/hls/${cam.external_id}/index.m3u8`;
+  };
+
   return (
     <div className="space-y-4 max-w-[1400px]">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold">Unified Live View</h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Sentinel Grid — {cameras.filter(c => c.stream_url).length} live HLS streams ·{" "}
+            Sentinel Grid — {cameras.length} live streams ·{" "}
             <a
-              href={HLS_CDN}
+              href={SENTINEL_PORTAL}
               target="_blank"
               rel="noopener noreferrer"
               className="text-orange-400 hover:underline"
             >
-              cctv.corp8.cloud
+              live.sentinelgujarat.in
             </a>
           </p>
         </div>
@@ -108,7 +112,7 @@ export default function LiveView() {
           >
             ← Back to grid
           </button>
-          <StreamTile camera={focus} big clock={clock} />
+          <StreamTile camera={focus} big clock={clock} proxyHlsUrl={proxyHlsUrl(focus)} />
         </div>
       ) : (
         <div
@@ -126,6 +130,7 @@ export default function LiveView() {
               camera={c}
               clock={clock}
               onExpand={() => setFocus(c)}
+              proxyHlsUrl={proxyHlsUrl(c)}
             />
           ))}
           {shown.length === 0 && (
@@ -138,15 +143,12 @@ export default function LiveView() {
       )}
 
       <p className="text-[11px] text-slate-600">
-        Streams served by the Sentinel Grid (
-        <a href={HLS_CDN} target="_blank" rel="noopener noreferrer" className="text-slate-500 hover:text-orange-400">
-          cctv.corp8.cloud
+        Streams proxied through the IVMS backend (authenticated to Sentinel Grid) ·
+        RTSP: <code className="text-slate-500">rtsp://103.250.160.189:8554/stream/cam01</code> (TCP) ·
+        Direct portal:{" "}
+        <a href={SENTINEL_PORTAL} target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">
+          live.sentinelgujarat.in
         </a>
-        ) · HLS over CDN · Session cookie required — open{" "}
-        <a href={HLS_CDN} target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline">
-          the grid portal
-        </a>{" "}
-        in another tab then refresh this page to authenticate.
       </p>
     </div>
   );
@@ -159,26 +161,28 @@ function StreamTile({
   big,
   clock,
   onExpand,
+  proxyHlsUrl,
 }: {
   camera: Camera;
   big?: boolean;
   clock: Date;
   onExpand?: () => void;
+  proxyHlsUrl: string | null;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoff = useBackoff();
-  const [state, setState] = useState<TileState>(
-    camera.stream_url ? "loading" : "no-stream"
-  );
+  // Use the proxied URL first (backend handles auth), fallback to direct CDN
+  const hlsUrl = proxyHlsUrl ?? camera.stream_url;
+  const [state, setState] = useState<TileState>(hlsUrl ? "loading" : "no-stream");
 
   useEffect(() => {
-    if (!camera.stream_url) {
+    if (!hlsUrl) {
       setState("no-stream");
       return;
     }
-    const url = camera.stream_url;
+    const url = hlsUrl;
 
     function attach() {
       if (!videoRef.current) return;
@@ -189,10 +193,7 @@ function StreamTile({
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          // integration.txt §3: do NOT trust frame arrival time — hls.js
-          // drives timing from PTS internally, which is correct behaviour.
-          // We set maxBufferLength low for a dashboard grid to keep latency
-          // bounded without hammering bandwidth.
+          // integration.txt §3: PTS-driven timing, bounded buffer for dashboard
           maxBufferLength: 8,
           maxMaxBufferLength: 15,
         });
@@ -214,14 +215,9 @@ function StreamTile({
           retryTimer.current = setTimeout(attach, delay);
         });
 
-        // integration.txt §3: log decoder warnings at join, do not treat as fatal.
+        // integration.txt §3: log decoder warnings, do not treat as fatal.
         hls.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, () => {
-          console.debug(`[hls] ${camera.external_id} — init segment parsed (H.264/H.265 codec negotiated)`);
-        });
-
-        // integration.txt §3: handle scene discontinuity at loop point — just continue.
-        hls.on(Hls.Events.FRAG_CHANGED, () => {
-          // no-op: discontinuity is handled internally by hls.js
+          console.debug(`[hls] ${camera.external_id} — init segment parsed`);
         });
 
         hls.loadSource(url);
@@ -250,7 +246,7 @@ function StreamTile({
       if (retryTimer.current) clearTimeout(retryTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.stream_url, camera.external_id]);
+  }, [hlsUrl, camera.external_id]);
 
   const iconSize = big ? 40 : 22;
 
@@ -282,12 +278,12 @@ function StreamTile({
           <span className="text-xs text-red-400">Reconnecting…</span>
           {big && (
             <a
-              href={HLS_CDN}
+              href={SENTINEL_PORTAL}
               target="_blank"
               rel="noopener noreferrer"
               className="text-[11px] text-orange-400 hover:underline flex items-center gap-1 mt-1"
             >
-              Authenticate at Sentinel Grid <ExternalLink size={10} />
+              Open Sentinel Grid <ExternalLink size={10} />
             </a>
           )}
         </div>
