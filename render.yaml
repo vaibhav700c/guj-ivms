@@ -16,17 +16,26 @@ services:
           name: guj-ivms-db
           property: connectionString
       - key: CORS_ORIGINS
-        sync: false # set to your Vercel frontend URL
+        value: "https://guj-ivms.vercel.app,https://live.sentinelgujarat.in"
       - key: SECRET_KEY
         generateValue: true
       - key: REQUIRE_AUTH
         value: "false" # set "true" to enforce JWT on all APIs
       - key: SIMULATOR_AUTO_START
-        value: "true" # demo event generation; set "false" for real ingest
+        value: "true" # demo event generation; set "false" when real ingest nodes connect
       - key: INGEST_API_KEY
         generateValue: true
       - key: SEED_ON_STARTUP
         value: "true"
+      # Sentinel Camera Grid — real stream infrastructure
+      - key: SENTINEL_HLS_BASE
+        value: "https://cctv.corp8.cloud"
+      - key: SENTINEL_RTSP_BASE
+        value: "rtsp://103.250.160.189:8554/stream"
+      - key: SENTINEL_WHEP_BASE
+        value: "http://103.250.160.189:8889/stream"
+      - key: SENTINEL_PASSWORD
+        sync: false  # set in Render dashboard — do NOT commit to git
 
 databases:
   - name: guj-ivms-db

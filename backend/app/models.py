@@ -60,7 +60,9 @@ class Camera(Base):
     has_ir: Mapped[bool] = mapped_column(Boolean, default=False)
     has_ptz: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    stream_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    stream_url: Mapped[str | None] = mapped_column(String(500), nullable=True)   # HLS (CDN)
+    rtsp_url: Mapped[str | None] = mapped_column(String(500), nullable=True)     # RTSP direct (AI inference)
+    whep_url: Mapped[str | None] = mapped_column(String(500), nullable=True)     # WebRTC/WHEP (low-latency browser)
     stream_protocol: Mapped[str | None] = mapped_column(String(20), nullable=True)
     vms_vendor: Mapped[str | None] = mapped_column(String(100), nullable=True)
 

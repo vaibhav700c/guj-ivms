@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Search, Video, CircleDot } from "lucide-react";
+import { Search, Video, CircleDot, ExternalLink, Wifi } from "lucide-react";
 import { api } from "../lib/api";
 
 interface Camera {
   id: number;
+  external_id: string | null;
   name: string;
   city: string | null;
   district: string | null;
@@ -12,7 +13,11 @@ interface Camera {
   status: string;
   health_score: number | null;
   resolution: string | null;
+  stream_url: string | null;      // HLS (CDN)
+  rtsp_url: string | null;        // RTSP direct
+  whep_url: string | null;        // WebRTC/WHEP
   stream_protocol: string | null;
+  vms_vendor: string | null;
 }
 
 const STATUS_STYLE: Record<string, string> = {
@@ -117,7 +122,28 @@ export default function Cameras() {
                       Tier {c.analytics_tier}
                     </span>
                   </td>
-                  <td className="table-cell font-mono text-xs text-slate-500">{c.stream_protocol} · {c.resolution}</td>
+                  <td className="table-cell">
+                    {c.stream_url ? (
+                      <div className="flex flex-col gap-0.5">
+                        <a
+                          href={c.stream_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-emerald-400 hover:underline text-[11px] font-mono flex items-center gap-1"
+                          title={c.stream_url}
+                        >
+                          <Wifi size={10} /> HLS <ExternalLink size={9} />
+                        </a>
+                        {c.rtsp_url && (
+                          <span className="text-sky-500/80 text-[10px] font-mono truncate max-w-[140px]" title={c.rtsp_url}>
+                            RTSP (TCP)
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-[11px] text-slate-600">{c.stream_protocol ?? "—"}</span>
+                    )}
+                  </td>
                   <td className="table-cell">
                     <div className="flex items-center gap-2">
                       <div className="w-16 h-1.5 rounded bg-control-700 overflow-hidden">

@@ -51,7 +51,9 @@ def serialize(c: Camera) -> dict:
         "camera_type": c.camera_type,
         "resolution": c.resolution,
         "fps": c.fps,
-        "stream_url": c.stream_url,
+        "stream_url": c.stream_url,      # HLS (CDN)
+        "rtsp_url": getattr(c, "rtsp_url", None),    # RTSP direct (AI/inference)
+        "whep_url": getattr(c, "whep_url", None),    # WebRTC/WHEP (low-latency browser)
         "stream_protocol": c.stream_protocol,
         "vms_vendor": c.vms_vendor,
         "status": c.status,

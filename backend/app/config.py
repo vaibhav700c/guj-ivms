@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     # Seed
     SEED_ON_STARTUP: bool = True
 
+    # Sentinel Camera Grid — real stream infrastructure
+    SENTINEL_HLS_BASE: str = "https://cctv.corp8.cloud"
+    SENTINEL_RTSP_BASE: str = "rtsp://103.250.160.189:8554/stream"
+    SENTINEL_WHEP_BASE: str = "http://103.250.160.189:8889/stream"
+    SENTINEL_PASSWORD: str = ""  # set in Render dashboard (E6W6-8SAJ-3S9Z)
+    # Ingest federation
+    INGEST_API_KEY: str = ""
+
     class Config:
         env_file = ".env"
         case_sensitive = True

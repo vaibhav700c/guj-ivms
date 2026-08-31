@@ -17,6 +17,7 @@ from app.routes import (
     feeds,
     ingest,
     reports,
+    sentinel as sentinel_routes,
     simulator as simulator_routes,
     system,
     users,
@@ -78,6 +79,7 @@ app.include_router(analytics.router, prefix=API)
 app.include_router(vehicles.router, prefix=API)
 app.include_router(reports.router, prefix=API)
 app.include_router(ingest.router, prefix=API)
+app.include_router(sentinel_routes.router, prefix=API)
 app.include_router(simulator_routes.router, prefix=API)
 app.include_router(departments.router, prefix=API)
 app.include_router(feeds.router, prefix=API)
