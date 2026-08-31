@@ -129,16 +129,29 @@ async def hls_playlist(cam_id: str, request: Request):
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
 
-    # Rewrite .ts segment URLs to go through our proxy endpoint
+    # Rewrite segment URLs and EXT-X-KEY URI to go through our proxy
     content = resp.text
-    # Segments can be relative (e.g. seg0001.ts) or absolute
+
     def rewrite_line(line: str) -> str:
-        line = line.strip()
-        if line and not line.startswith("#"):
-            # Extract segment filename
-            seg = line.split("/")[-1].split("?")[0]
+        stripped = line.strip()
+        if not stripped:
+            return line
+        # Rewrite AES-128 key URI so browser fetches it through our proxy too
+        if stripped.startswith("#EXT-X-KEY") and 'URI="' in stripped:
+            import re
+            def _rewrite_uri(m):
+                uri = m.group(1)
+                if uri.startswith("/") or not uri.startswith("http"):
+                    # Relative URI — point to our enc.key proxy
+                    return f'URI="/api/v1/sentinel/hls/{cam_id}/enc.key"'
+                return m.group(0)
+            return re.sub(r'URI="([^"]+)"', _rewrite_uri, stripped)
+        # Rewrite .ts segment lines (non-# lines)
+        if not stripped.startswith("#"):
+            seg = stripped.split("/")[-1].split("?")[0]
             return f"/api/v1/sentinel/hls/{cam_id}/{seg}"
         return line
+
     rewritten = "\n".join(rewrite_line(l) for l in content.splitlines())
 
     return Response(
@@ -151,6 +164,35 @@ async def hls_playlist(cam_id: str, request: Request):
     )
 
 
+@router.get("/hls/{cam_id}/enc.key")
+async def hls_enc_key(cam_id: str):
+    """Proxy the AES-128 decryption key for HLS segments.
+    The key URI (/enc.key) is shared across all cameras on the CDN.
+    """
+    cookie = await _get_sentinel_cookie()
+    # Key is at /enc.key on the CDN root, not per-camera
+    upstream_url = f"{settings.SENTINEL_HLS_BASE}/enc.key"
+
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(resp.status_code, "Encryption key not found")
+
+    return Response(
+        content=resp.content,
+        media_type="application/octet-stream",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
 @router.get("/hls/{cam_id}/{segment}")
 async def hls_segment(cam_id: str, segment: str):
     """Proxy a single .ts segment from the CDN."""
@@ -159,7 +201,6 @@ async def hls_segment(cam_id: str, segment: str):
         raise HTTPException(400, "Invalid segment type")
 
     cookie = await _get_sentinel_cookie()
-    # Try to fetch segment — CDN may serve them from same path or different
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
