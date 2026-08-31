@@ -82,18 +82,24 @@ def reseed(
     if not expected or secret != expected:
         raise HTTPException(403, "Invalid secret")
 
-    from app.models import ANPREvent, Alert, DetectionEvent
     from app.seed import seed
 
-    # Clear in FK order
-    db.query(Alert).delete()
-    db.query(ANPREvent).delete()
-    db.query(DetectionEvent).delete()
-    db.query(Camera).delete()
-    db.query(WatchlistEntry).delete()
-    db.query(VehicleRecord).delete()
-    db.query(User).delete()
-    db.query(Department).delete()
+    # Use raw SQL so FK order is irrelevant (TRUNCATE ... CASCADE on Postgres,
+    # individual DELETEs on SQLite)
+    dialect = db.bind.dialect.name
+    if dialect == "postgresql":
+        db.execute(text(
+            "TRUNCATE TABLE alerts, anpr_events, detection_events, "
+            "cameras, watchlist_entries, vehicle_records, users, departments "
+            "RESTART IDENTITY CASCADE"
+        ))
+    else:
+        # SQLite: delete in FK order
+        for tbl in [
+            "alerts", "anpr_events", "detection_events",
+            "cameras", "watchlist_entries", "vehicle_records", "users", "departments",
+        ]:
+            db.execute(text(f"DELETE FROM {tbl}"))
     db.commit()
 
     seed(db)
