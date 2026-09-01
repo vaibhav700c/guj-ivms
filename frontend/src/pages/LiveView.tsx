@@ -29,8 +29,12 @@ function useBackoff(initial = 2000, cap = 30000) {
 
 const proxyHlsUrl = (cam: Camera): string | null => {
   if (!cam.external_id) return null;
+  // Always build through our backend proxy (avoids Sentinel CDN CORS/cookie issues)
   return `${API_BASE}/api/v1/sentinel/hls/${cam.external_id}/index.m3u8`;
 };
+
+// A camera is streamable if it has an external_id (Sentinel cam01–cam30)
+const isStreamable = (cam: Camera): boolean => !!(cam.external_id?.startsWith("cam"));
 
 export default function LiveView() {
   const [allCams, setAllCams] = useState<Camera[]>([]);
@@ -43,7 +47,7 @@ export default function LiveView() {
   useEffect(() => {
     api<{ items: Camera[] }>("/cameras?limit=100")
       .then((r) => {
-        const cams = r.items.filter((c) => c.stream_url);
+        const cams = r.items.filter(isStreamable);
         setAllCams(cams);
         setSelected(new Set(cams.slice(0, 9).map((c) => c.id)));
       })

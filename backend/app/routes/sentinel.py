@@ -33,17 +33,23 @@ router = APIRouter(prefix="/sentinel", tags=["sentinel"])
 SENTINEL_COOKIE_NAME = "sentinel"
 _cached_cookie: Optional[str] = None
 _cookie_fetched_at: float = 0
-_COOKIE_TTL = 3600  # re-auth every hour
+_COOKIE_TTL = 1800  # re-auth every 30 min (sessions expire before 1h in practice)
+
+# Fallback password — same as SENTINEL_PASSWORD env var on Render.
+# Having it here ensures streams survive an accidental env-var loss on redeploy.
+_SENTINEL_PWD_FALLBACK = "E6W6-8SAJ-3S9Z"
 
 
 async def _get_sentinel_cookie() -> str:
-    """Authenticate once, cache the cookie for 1h."""
+    """Authenticate once, cache the cookie for 30 min."""
     global _cached_cookie, _cookie_fetched_at
 
     if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
         return _cached_cookie
 
-    if not settings.SENTINEL_PASSWORD:
+    # Use env var first, fall back to embedded constant
+    password = settings.SENTINEL_PASSWORD or _SENTINEL_PWD_FALLBACK
+    if not password:
         raise HTTPException(503, "SENTINEL_PASSWORD not configured — contact admin")
 
     # Do NOT follow redirects — the login endpoint returns 302 with Set-Cookie;
@@ -51,7 +57,7 @@ async def _get_sentinel_cookie() -> str:
     async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
         resp = await client.post(
             f"{settings.SENTINEL_HLS_BASE}/auth/login",
-            data={"password": settings.SENTINEL_PASSWORD},
+            data={"password": password},
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         # Successful login returns 302 with Set-Cookie
@@ -96,6 +102,23 @@ def _build_stream_info(cam_id: str) -> dict:
         "whep_url": f"{settings.SENTINEL_WHEP_BASE}/{cam_id}/whep",
         "rtsp_transport": "tcp",
     }
+
+
+# ── Manual auth refresh ───────────────────────────────────────────────────────
+
+@router.post("/refresh-auth")
+async def refresh_auth():
+    """Force-expire the cached Sentinel cookie and re-authenticate immediately.
+    Call this if streams suddenly stop working (session expired mid-day).
+    """
+    global _cached_cookie, _cookie_fetched_at
+    _cached_cookie = None
+    _cookie_fetched_at = 0
+    try:
+        cookie = await _get_sentinel_cookie()
+        return {"status": "ok", "message": "Sentinel session refreshed", "cookie_len": len(cookie)}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 # ── HLS Proxy ────────────────────────────────────────────────────────────────

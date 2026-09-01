@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 HLS_BASE  = "https://cctv.corp8.cloud"
 RTSP_BASE = "rtsp://103.250.160.189:8554/stream"
 WHEP_BASE = "http://103.250.160.189:8889/stream"
+# Backend proxy base — relative path so it works on any deployment
+PROXY_BASE = "/api/v1/sentinel/hls"
 
 
 def seed(db: Session) -> None:
@@ -65,8 +67,11 @@ def seed(db: Session) -> None:
                 fps=25 if tier == "A" else 15,
                 has_ir=tier != "C",
                 has_ptz=ctype == "ptz",
-                # ── REAL Sentinel Grid stream URLs ──
-                stream_url=f"{HLS_BASE}/{sid}/index.m3u8",
+                # ── Stream URLs ──
+                # stream_url → proxied HLS through our backend (no CORS/cookie issues)
+                # rtsp_url   → direct RTSP for AI inference (TCP)
+                # whep_url   → direct WebRTC WHEP (http-only, blocked on https pages)
+                stream_url=f"{PROXY_BASE}/{sid}/index.m3u8",
                 rtsp_url=f"{RTSP_BASE}/{sid}",
                 whep_url=f"{WHEP_BASE}/{sid}/whep",
                 stream_protocol="hls",
