@@ -28,37 +28,22 @@ _cached_cookie: Optional[str] = None
 _cookie_fetched_at: float = 0
 _COOKIE_TTL = 1800  # re-auth every 30 min
 
-_cookie_lock = asyncio.Lock()
-_http_client: Optional[httpx.AsyncClient] = None
-
 # A real browser User-Agent is REQUIRED to prevent Cloudflare from tarpitting requests.
 SPOOFED_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
-
-def get_http_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None:
-        # HTTP/1.1 connection pool (Cloudflare supports keep-alive)
-        _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=10.0),
-            limits=httpx.Limits(max_keepalive_connections=100, max_connections=200),
-            follow_redirects=False,
-        )
-    return _http_client
 
 
 async def _get_sentinel_cookie() -> str:
     """Authenticate once, cache the cookie."""
     global _cached_cookie, _cookie_fetched_at
 
-    async with _cookie_lock:
-        if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
-            return _cached_cookie
+    if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
+        return _cached_cookie
 
-        password = settings.SENTINEL_PASSWORD or "E6W6-8SAJ-3S9Z"
-        if not password:
-            raise HTTPException(503, "SENTINEL_PASSWORD not configured")
+    password = settings.SENTINEL_PASSWORD or "E6W6-8SAJ-3S9Z"
+    if not password:
+        raise HTTPException(503, "SENTINEL_PASSWORD not configured")
 
-        client = get_http_client()
+    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
         resp = await client.post(
             f"{settings.SENTINEL_HLS_BASE}/auth/login",
             data={"password": password},
@@ -81,10 +66,10 @@ async def _get_sentinel_cookie() -> str:
         if not cookie:
             raise HTTPException(502, f"Sentinel auth failed: HTTP {resp.status_code}")
 
-        _cached_cookie = cookie
-        _cookie_fetched_at = time.time()
-        logger.info("Sentinel session refreshed")
-        return _cached_cookie
+    _cached_cookie = cookie
+    _cookie_fetched_at = time.time()
+    logger.info("Sentinel session refreshed")
+    return _cached_cookie
 
 
 def _build_stream_info(cam_id: str) -> dict:
@@ -116,23 +101,24 @@ async def hls_playlist(cam_id: str, request: Request):
     cam_id = cam_id.lower()
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
-    client = get_http_client()
 
-    resp = await client.get(
-        upstream_url,
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": SPOOFED_USER_AGENT},
-    )
-
-    if resp.status_code == 401 or resp.status_code == 302:
-        global _cached_cookie
-        _cached_cookie = None
-        cookie = await _get_sentinel_cookie()
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         resp = await client.get(
             upstream_url,
             cookies={SENTINEL_COOKIE_NAME: cookie},
             headers={"User-Agent": SPOOFED_USER_AGENT},
         )
+
+    if resp.status_code == 401 or resp.status_code == 302:
+        global _cached_cookie
+        _cached_cookie = None
+        cookie = await _get_sentinel_cookie()
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(
+                upstream_url,
+                cookies={SENTINEL_COOKIE_NAME: cookie},
+                headers={"User-Agent": SPOOFED_USER_AGENT},
+            )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
@@ -171,13 +157,13 @@ async def hls_playlist(cam_id: str, request: Request):
 async def hls_enc_key(cam_id: str):
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/enc.key"
-    client = get_http_client()
 
-    resp = await client.get(
-        upstream_url,
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": SPOOFED_USER_AGENT},
-    )
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": SPOOFED_USER_AGENT},
+        )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, "Encryption key not found")
@@ -200,13 +186,13 @@ async def hls_segment(cam_id: str, segment: str):
 
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
-    client = get_http_client()
 
-    resp = await client.get(
-        upstream_url,
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": SPOOFED_USER_AGENT},
-    )
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": SPOOFED_USER_AGENT},
+        )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Segment not found: {segment}")
@@ -223,14 +209,14 @@ async def hls_segment(cam_id: str, segment: str):
 
 async def _fetch_sentinel_catalogue() -> list[dict]:
     cookie = await _get_sentinel_cookie()
-    client = get_http_client()
-    resp = await client.get(
-        f"{settings.SENTINEL_HLS_BASE}/cameras.json",
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": SPOOFED_USER_AGENT},
-    )
-    resp.raise_for_status()
-    return resp.json()
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        resp = await client.get(
+            f"{settings.SENTINEL_HLS_BASE}/cameras.json",
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": SPOOFED_USER_AGENT},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 @router.get("/catalogue")
