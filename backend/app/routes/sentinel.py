@@ -50,42 +50,41 @@ async def _get_sentinel_cookie() -> str:
         if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
             return _cached_cookie
 
-    # Use env var first, fall back to embedded constant
-    password = settings.SENTINEL_PASSWORD or _SENTINEL_PWD_FALLBACK
-    if not password:
-        raise HTTPException(503, "SENTINEL_PASSWORD not configured — contact admin")
+        # Use env var first, fall back to embedded constant
+        password = settings.SENTINEL_PASSWORD or _SENTINEL_PWD_FALLBACK
+        if not password:
+            raise HTTPException(503, "SENTINEL_PASSWORD not configured — contact admin")
 
-    # Do NOT follow redirects — the login endpoint returns 302 with Set-Cookie;
-    # following the redirect causes httpx to lose the cookie.
-    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-        resp = await client.post(
-            f"{settings.SENTINEL_HLS_BASE}/auth/login",
-            data={"password": password},
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "GujIVMS/1.0 HLS-Proxy"
-            },
-        )
-        # Successful login returns 302 with Set-Cookie
-        cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
-        if not cookie and resp.status_code == 302:
-            # Try reading from raw Set-Cookie header as fallback
-            raw_cookie = resp.headers.get("set-cookie", "")
-            if SENTINEL_COOKIE_NAME in raw_cookie:
-                # Parse out just the value: sentinel=<value>;
-                for part in raw_cookie.split(";"):
-                    part = part.strip()
-                    if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
-                        cookie = part.split("=", 1)[1]
-                        break
-        if not cookie:
-            raise HTTPException(
-                502,
-                f"Sentinel auth failed — status {resp.status_code}, no cookie returned. "
-                "Check SENTINEL_PASSWORD env var on Render."
+        # Do NOT follow redirects — the login endpoint returns 302 with Set-Cookie;
+        # following the redirect causes httpx to lose the cookie.
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
+            resp = await client.post(
+                f"{settings.SENTINEL_HLS_BASE}/auth/login",
+                data={"password": password},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": "GujIVMS/1.0 HLS-Proxy"
+                },
             )
+            # Successful login returns 302 with Set-Cookie
+            cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
+            if not cookie and resp.status_code == 302:
+                # Try reading from raw Set-Cookie header as fallback
+                raw_cookie = resp.headers.get("set-cookie", "")
+                if SENTINEL_COOKIE_NAME in raw_cookie:
+                    # Parse out just the value: sentinel=<value>;
+                    for part in raw_cookie.split(";"):
+                        part = part.strip()
+                        if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
+                            cookie = part.split("=", 1)[1]
+                            break
+            if not cookie:
+                raise HTTPException(
+                    502,
+                    f"Sentinel auth failed — status {resp.status_code}, no cookie returned. "
+                    "Check SENTINEL_PASSWORD env var on Render."
+                )
 
-    async with _cookie_lock:
         _cached_cookie = cookie
         _cookie_fetched_at = time.time()
         logger.info("Sentinel session refreshed (HTTP %d)", resp.status_code)
