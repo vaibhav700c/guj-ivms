@@ -58,7 +58,10 @@ async def _get_sentinel_cookie() -> str:
         resp = await client.post(
             f"{settings.SENTINEL_HLS_BASE}/auth/login",
             data={"password": password},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "GujIVMS/1.0 HLS-Proxy"
+            },
         )
         # Successful login returns 302 with Set-Cookie
         cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
