@@ -33,62 +33,50 @@ router = APIRouter(prefix="/sentinel", tags=["sentinel"])
 SENTINEL_COOKIE_NAME = "sentinel"
 _cached_cookie: Optional[str] = None
 _cookie_fetched_at: float = 0
-_COOKIE_TTL = 1800  # re-auth every 30 min (sessions expire before 1h in practice)
+_COOKIE_TTL = 3600  # re-auth every hour
 
-# Fallback password — same as SENTINEL_PASSWORD env var on Render.
-# Having it here ensures streams survive an accidental env-var loss on redeploy.
-_SENTINEL_PWD_FALLBACK = "E6W6-8SAJ-3S9Z"
-
-
-_cookie_lock = asyncio.Lock()
 
 async def _get_sentinel_cookie() -> str:
-    """Authenticate once, cache the cookie for 30 min."""
+    """Authenticate once, cache the cookie for 1h."""
     global _cached_cookie, _cookie_fetched_at
 
-    async with _cookie_lock:
-        if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
-            return _cached_cookie
-
-        # Use env var first, fall back to embedded constant
-        password = settings.SENTINEL_PASSWORD or _SENTINEL_PWD_FALLBACK
-        if not password:
-            raise HTTPException(503, "SENTINEL_PASSWORD not configured — contact admin")
-
-        # Do NOT follow redirects — the login endpoint returns 302 with Set-Cookie;
-        # following the redirect causes httpx to lose the cookie.
-        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-            resp = await client.post(
-                f"{settings.SENTINEL_HLS_BASE}/auth/login",
-                data={"password": password},
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "User-Agent": "GujIVMS/1.0 HLS-Proxy"
-                },
-            )
-            # Successful login returns 302 with Set-Cookie
-            cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
-            if not cookie and resp.status_code == 302:
-                # Try reading from raw Set-Cookie header as fallback
-                raw_cookie = resp.headers.get("set-cookie", "")
-                if SENTINEL_COOKIE_NAME in raw_cookie:
-                    # Parse out just the value: sentinel=<value>;
-                    for part in raw_cookie.split(";"):
-                        part = part.strip()
-                        if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
-                            cookie = part.split("=", 1)[1]
-                            break
-            if not cookie:
-                raise HTTPException(
-                    502,
-                    f"Sentinel auth failed — status {resp.status_code}, no cookie returned. "
-                    "Check SENTINEL_PASSWORD env var on Render."
-                )
-
-        _cached_cookie = cookie
-        _cookie_fetched_at = time.time()
-        logger.info("Sentinel session refreshed (HTTP %d)", resp.status_code)
+    if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
         return _cached_cookie
+
+    if not settings.SENTINEL_PASSWORD:
+        raise HTTPException(503, "SENTINEL_PASSWORD not configured — contact admin")
+
+    # Do NOT follow redirects — the login endpoint returns 302 with Set-Cookie;
+    # following the redirect causes httpx to lose the cookie.
+    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
+        resp = await client.post(
+            f"{settings.SENTINEL_HLS_BASE}/auth/login",
+            data={"password": settings.SENTINEL_PASSWORD},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        # Successful login returns 302 with Set-Cookie
+        cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
+        if not cookie and resp.status_code == 302:
+            # Try reading from raw Set-Cookie header as fallback
+            raw_cookie = resp.headers.get("set-cookie", "")
+            if SENTINEL_COOKIE_NAME in raw_cookie:
+                # Parse out just the value: sentinel=<value>;
+                for part in raw_cookie.split(";"):
+                    part = part.strip()
+                    if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
+                        cookie = part.split("=", 1)[1]
+                        break
+        if not cookie:
+            raise HTTPException(
+                502,
+                f"Sentinel auth failed — status {resp.status_code}, no cookie returned. "
+                "Check SENTINEL_PASSWORD env var on Render."
+            )
+
+    _cached_cookie = cookie
+    _cookie_fetched_at = time.time()
+    logger.info("Sentinel session refreshed (HTTP %d)", resp.status_code)
+    return _cached_cookie
 
 
 def _build_stream_info(cam_id: str) -> dict:
@@ -110,34 +98,6 @@ def _build_stream_info(cam_id: str) -> dict:
     }
 
 
-# ── Manual auth refresh ───────────────────────────────────────────────────────
-
-@router.post("/refresh-auth")
-async def refresh_auth():
-    """Force-expire the cached Sentinel cookie and re-authenticate immediately.
-    Call this if streams suddenly stop working (session expired mid-day).
-    """
-    global _cached_cookie, _cookie_fetched_at
-    _cached_cookie = None
-    _cookie_fetched_at = 0
-    try:
-        cookie = await _get_sentinel_cookie()
-        return {"status": "ok", "message": "Sentinel session refreshed", "cookie_len": len(cookie)}
-    except Exception as exc:
-        return {"status": "error", "message": str(exc)}
-
-
-_http_client: Optional[httpx.AsyncClient] = None
-
-def get_http_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None:
-        _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
-            limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
-        )
-    return _http_client
-
 # ── HLS Proxy ────────────────────────────────────────────────────────────────
 
 @router.get("/hls/{cam_id}/index.m3u8")
@@ -146,26 +106,25 @@ async def hls_playlist(cam_id: str, request: Request):
     cam_id = cam_id.lower()
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
-    client = get_http_client()
 
-    resp = await client.get(
-        upstream_url,
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-        follow_redirects=False,
-    )
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        )
 
     if resp.status_code == 401 or resp.status_code == 302:
         # Cookie expired — clear and retry once
         global _cached_cookie
         _cached_cookie = None
         cookie = await _get_sentinel_cookie()
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-            follow_redirects=False,
-        )
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(
+                upstream_url,
+                cookies={SENTINEL_COOKIE_NAME: cookie},
+                headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+            )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
@@ -211,15 +170,15 @@ async def hls_enc_key(cam_id: str):
     The key URI (/enc.key) is shared across all cameras on the CDN.
     """
     cookie = await _get_sentinel_cookie()
+    # Key is at /enc.key on the CDN root, not per-camera
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/enc.key"
-    client = get_http_client()
 
-    resp = await client.get(
-        upstream_url,
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-        follow_redirects=False,
-    )
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, "Encryption key not found")
@@ -243,15 +202,13 @@ async def hls_segment(cam_id: str, segment: str):
 
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
-    client = get_http_client()
 
-    resp = await client.get(
-        upstream_url,
-        cookies={SENTINEL_COOKIE_NAME: cookie},
-        headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-        follow_redirects=False,
-        timeout=30.0,
-    )
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Segment not found: {segment}")
