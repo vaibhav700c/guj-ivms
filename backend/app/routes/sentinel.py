@@ -40,12 +40,15 @@ _COOKIE_TTL = 1800  # re-auth every 30 min (sessions expire before 1h in practic
 _SENTINEL_PWD_FALLBACK = "E6W6-8SAJ-3S9Z"
 
 
+_cookie_lock = asyncio.Lock()
+
 async def _get_sentinel_cookie() -> str:
     """Authenticate once, cache the cookie for 30 min."""
     global _cached_cookie, _cookie_fetched_at
 
-    if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
-        return _cached_cookie
+    async with _cookie_lock:
+        if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
+            return _cached_cookie
 
     # Use env var first, fall back to embedded constant
     password = settings.SENTINEL_PASSWORD or _SENTINEL_PWD_FALLBACK
@@ -82,10 +85,11 @@ async def _get_sentinel_cookie() -> str:
                 "Check SENTINEL_PASSWORD env var on Render."
             )
 
-    _cached_cookie = cookie
-    _cookie_fetched_at = time.time()
-    logger.info("Sentinel session refreshed (HTTP %d)", resp.status_code)
-    return _cached_cookie
+    async with _cookie_lock:
+        _cached_cookie = cookie
+        _cookie_fetched_at = time.time()
+        logger.info("Sentinel session refreshed (HTTP %d)", resp.status_code)
+        return _cached_cookie
 
 
 def _build_stream_info(cam_id: str) -> dict:
@@ -133,7 +137,7 @@ async def hls_playlist(cam_id: str, request: Request):
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
         resp = await client.get(
             upstream_url,
             cookies={SENTINEL_COOKIE_NAME: cookie},
@@ -145,7 +149,7 @@ async def hls_playlist(cam_id: str, request: Request):
         global _cached_cookie
         _cached_cookie = None
         cookie = await _get_sentinel_cookie()
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             resp = await client.get(
                 upstream_url,
                 cookies={SENTINEL_COOKIE_NAME: cookie},
@@ -199,7 +203,7 @@ async def hls_enc_key(cam_id: str):
     # Key is at /enc.key on the CDN root, not per-camera
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/enc.key"
 
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
         resp = await client.get(
             upstream_url,
             cookies={SENTINEL_COOKIE_NAME: cookie},
@@ -229,7 +233,7 @@ async def hls_segment(cam_id: str, segment: str):
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
 
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
         resp = await client.get(
             upstream_url,
             cookies={SENTINEL_COOKIE_NAME: cookie},
