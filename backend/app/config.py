@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     REQUIRE_AUTH: bool = False  # set true in production to enforce JWT on APIs
 
     # CORS
-    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000,https://guj-ivms.vercel.app,https://live.sentinelgujarat.in"
 
     # Demo simulator (edge/analytics node emulation)
     SIMULATOR_AUTO_START: bool = True
