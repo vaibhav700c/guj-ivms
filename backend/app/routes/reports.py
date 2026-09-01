@@ -1,12 +1,16 @@
-"""Report exports — CSV (alerts, ANPR events, journey, camera registry)."""
+"""Report exports — CSV + PDF (alerts, ANPR events, camera registry).
+
+Plan §13 /reports + §20 Week 3 "Analytics export (PDF/CSV reports)".
+"""
 import csv
 import io
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Alert, ANPREvent, Camera
+from app.pdf import build_pdf
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -23,42 +27,81 @@ def _csv_response(filename: str, header: list[str], rows) -> Response:
     )
 
 
-@router.get("/alerts.csv")
-def export_alerts(db: Session = Depends(get_db)):
+def _pdf_response(filename: str, title: str, header: list[str], rows) -> Response:
+    pdf = build_pdf(title, "Gujarat IVMS — automated export", header, rows)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+def _alert_rows(db: Session):
     alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(5000).all()
+    header = ["id", "type", "severity", "identifier", "camera", "status", "timestamp"]
     rows = [
         [a.id, a.alert_type, a.severity, a.detected_identifier,
          a.camera.name if a.camera else "", a.status,
          a.timestamp.isoformat() if a.timestamp else ""]
         for a in alerts
     ]
-    return _csv_response("alerts.csv",
-                         ["id", "type", "severity", "identifier", "camera", "status", "timestamp"],
-                         rows)
+    return header, rows
 
 
-@router.get("/anpr.csv")
-def export_anpr(db: Session = Depends(get_db), limit: int = 5000):
+def _anpr_rows(db: Session, limit: int = 5000):
     events = db.query(ANPREvent).order_by(ANPREvent.timestamp.desc()).limit(limit).all()
+    header = ["id", "plate", "camera", "vehicle_type", "direction", "confidence", "timestamp"]
     rows = [
         [e.id, e.plate_text, e.camera.name if e.camera else e.camera_id,
          e.vehicle_type or "", e.direction or "", e.confidence,
          e.timestamp.isoformat() if e.timestamp else ""]
         for e in events
     ]
-    return _csv_response("anpr_events.csv",
-                         ["id", "plate", "camera", "vehicle_type", "direction", "confidence", "timestamp"],
-                         rows)
+    return header, rows
 
 
-@router.get("/cameras.csv")
-def export_cameras(db: Session = Depends(get_db)):
+def _camera_rows(db: Session):
     cams = db.query(Camera).order_by(Camera.id).all()
+    header = ["id", "name", "city", "district", "lat", "lng", "type", "tier", "status"]
     rows = [
         [c.id, c.name, c.city or "", c.district or "", c.latitude, c.longitude,
          c.camera_type or "", c.analytics_tier, c.status]
         for c in cams
     ]
-    return _csv_response("camera_registry.csv",
-                         ["id", "name", "city", "district", "lat", "lng", "type", "tier", "status"],
-                         rows)
+    return header, rows
+
+
+@router.get("/alerts.csv")
+def export_alerts(db: Session = Depends(get_db)):
+    header, rows = _alert_rows(db)
+    return _csv_response("alerts.csv", header, rows)
+
+
+@router.get("/alerts.pdf")
+def export_alerts_pdf(db: Session = Depends(get_db)):
+    header, rows = _alert_rows(db)
+    return _pdf_response("alerts.pdf", "Watchlist Alert Report", header, rows)
+
+
+@router.get("/anpr.csv")
+def export_anpr(db: Session = Depends(get_db), limit: int = 5000):
+    header, rows = _anpr_rows(db, limit)
+    return _csv_response("anpr_events.csv", header, rows)
+
+
+@router.get("/anpr.pdf")
+def export_anpr_pdf(db: Session = Depends(get_db), limit: int = 5000):
+    header, rows = _anpr_rows(db, limit)
+    return _pdf_response("anpr_events.pdf", "ANPR Detection Report", header, rows)
+
+
+@router.get("/cameras.csv")
+def export_cameras(db: Session = Depends(get_db)):
+    header, rows = _camera_rows(db)
+    return _csv_response("camera_registry.csv", header, rows)
+
+
+@router.get("/cameras.pdf")
+def export_cameras_pdf(db: Session = Depends(get_db)):
+    header, rows = _camera_rows(db)
+    return _pdf_response("camera_registry.pdf", "Camera Registry Report", header, rows)

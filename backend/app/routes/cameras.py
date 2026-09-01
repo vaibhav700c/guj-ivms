@@ -249,9 +249,10 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db),
     return serialize(camera)
 
 
-@router.patch("/{camera_id}")
+@router.api_route("/{camera_id}", methods=["PATCH", "PUT"])
 def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(get_db),
                   _: object = Depends(get_current_user)):
+    """Update camera metadata (plan §13 PATCH/PUT /cameras/{id})."""
     camera = db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(404, "Camera not found")

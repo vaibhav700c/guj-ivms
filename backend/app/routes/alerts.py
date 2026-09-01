@@ -82,6 +82,39 @@ def alert_stats(db: Session = Depends(get_db)):
     }
 
 
+@router.put("/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: int, db: Session = Depends(get_db),
+                      _: object = Depends(get_current_user)):
+    """Acknowledge an alert (plan §13 PUT /alerts/{id}/acknowledge)."""
+    alert = db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(404, "Alert not found")
+    alert.status = "acknowledged"
+    alert.acknowledged_at = datetime.now(timezone.utc)
+    alert.acknowledged_by = alert.acknowledged_by or "control-room"
+    db.commit()
+    db.refresh(alert)
+    return serialize(alert)
+
+
+@router.put("/{alert_id}/resolve")
+def resolve_alert(alert_id: int, db: Session = Depends(get_db),
+                  _: object = Depends(get_current_user)):
+    """Resolve an alert (plan §13 PUT /alerts/{id}/resolve)."""
+    alert = db.get(Alert, alert_id)
+    if not alert:
+        raise HTTPException(404, "Alert not found")
+    now = datetime.now(timezone.utc)
+    if alert.status == "new":
+        alert.acknowledged_at = now
+        alert.acknowledged_by = alert.acknowledged_by or "control-room"
+    alert.status = "resolved"
+    alert.resolved_at = now
+    db.commit()
+    db.refresh(alert)
+    return serialize(alert)
+
+
 @router.patch("/{alert_id}/status")
 def update_status(alert_id: int, payload: AlertStatusUpdate, db: Session = Depends(get_db),
                   _: object = Depends(get_current_user)):

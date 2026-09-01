@@ -61,6 +61,9 @@ export default function Analytics() {
             { href: `${BASE}/api/v1/reports/alerts.csv`, label: "Alerts CSV" },
             { href: `${BASE}/api/v1/reports/anpr.csv`, label: "ANPR CSV" },
             { href: `${BASE}/api/v1/reports/cameras.csv`, label: "Registry CSV" },
+            { href: `${BASE}/api/v1/reports/alerts.pdf`, label: "Alerts PDF" },
+            { href: `${BASE}/api/v1/reports/anpr.pdf`, label: "ANPR PDF" },
+            { href: `${BASE}/api/v1/reports/cameras.pdf`, label: "Registry PDF" },
           ].map((d) => (
             <a key={d.href} className="btn-ghost text-xs" href={d.href} download>
               <Download size={12} /> {d.label}

@@ -25,6 +25,10 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 | Camera health monitoring (time-series health log, feeds/status) | plan §9.1 / §13 | `GET /cameras/{id}/health-log`, `/feeds/status` |
 | GIS coverage + gap analysis report | plan §9.2 / §13 | `GET /cameras/geo/coverage`, `/cameras/gap-analysis` |
 | Federation connector registry | plan §11.2 | `GET /system/adapters` |
+| Live snapshot capture (`GET /feeds/{id}/snapshot`, ffmpeg over live HLS) | plan §13 | `backend/app/routes/feeds.py` |
+| Watchlist bulk import (JSON/CSV) + PDF report exports | plan §13 / §20 | `POST /watchlist/bulk-import`, `GET /reports/{kind}.pdf` |
+| Per-camera analytics WebSocket (`/ws/analytics/{camera_id}`) | plan §13 | `backend/app/routes/ws.py` |
+| Backend test suite (19 e2e tests: ingest→alert→resolve, journey, PDF, RBAC) | robustness | `backend/tests/` |
 | Demo simulator (edge-node emulation) — makes the deployed product live-demoable | plan §20 | `backend/app/simulator.py` |
 | JWT + RBAC auth, PBKDF2 password hashing, user management | plan §17 | `backend/app/security.py`, `routes/users.py` |
 
@@ -34,6 +38,8 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 - **Solution presentation (20-slide PDF)** — [docs/PRESENTATION.pdf](docs/PRESENTATION.pdf) (regenerate: `python docs/generate_presentation.py`)
 - **Demo script (2–3 min, plan §20.2 test scenario)** — [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)
 - **Deployment guide** — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- **API reference** — [docs/API.md](docs/API.md) · live Swagger at `/docs`
+- **Security architecture** — [docs/SECURITY.md](docs/SECURITY.md)
 - **This repository** with full code + docker-compose + deploy configs
 
 ## Quick start (zero-config dev)
@@ -41,10 +47,13 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 ```bash
 # Backend (SQLite fallback — no Postgres needed)
 cd backend
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/uvicorn app.main:app --port 8000
-# Seeded automatically: 50 cameras, watchlist, VAHAN records, users
+# Seeded automatically: 30 Sentinel Grid cameras, watchlist, VAHAN records, users
 # Demo simulator starts automatically and generates live events + alerts
+
+# Run the test suite (isolated SQLite DB, deterministic — simulator disabled)
+.venv/bin/python -m pytest tests/ -v
 
 # Frontend
 cd frontend

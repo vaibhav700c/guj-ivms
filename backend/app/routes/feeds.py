@@ -1,11 +1,16 @@
-"""Live feeds routes — stream URLs + feed health (plan §13 /feeds)."""
+"""Live feeds routes — stream URLs, snapshots + feed health (plan §13 /feeds)."""
+import asyncio
 import random
+import shutil
+import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db import get_db
 from app.models import Camera
+from app.routes.sentinel import SENTINEL_COOKIE_NAME, _get_sentinel_cookie
 
 router = APIRouter(prefix="/feeds", tags=["feeds"])
 
@@ -68,3 +73,69 @@ def feed_url(camera_id: int, db: Session = Depends(get_db)):
         "protocol": camera.stream_protocol,
         **_playback_urls(camera),
     }
+
+
+# ── Snapshot capture (plan §13 feeds/{camera_id}/snapshot) ────────────────────
+
+_snapshot_cache: dict[int, tuple[float, bytes]] = {}
+_SNAPSHOT_TTL = 8.0  # seconds — one capture per camera per 8s window
+
+
+async def _capture_frame(cam_id: str) -> bytes:
+    """Grab one JPEG frame from the live HLS stream using ffmpeg.
+
+    ffmpeg decrypts the AES-128 HLS segments itself when given the playlist
+    URL with the Sentinel session cookie. Raises HTTPException on failure.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(
+            503, "ffmpeg is not available on this deployment — snapshot capture disabled"
+        )
+    cookie = await _get_sentinel_cookie()
+    url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
+    cmd = [
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        "-headers", f"Cookie: {SENTINEL_COOKIE_NAME}={cookie}\r\n",
+        "-user_agent", "GujIVMS/1.0 snapshot",
+        "-rw_timeout", "15000000",  # 15s IO timeout (microseconds)
+        "-i", url,
+        "-frames:v", "1", "-q:v", "3", "-f", "image2", "pipe:1",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise HTTPException(504, "Snapshot capture timed out")
+    if proc.returncode != 0 or not out:
+        detail = err.decode(errors="replace")[-200:] if err else "no frame decoded"
+        raise HTTPException(502, f"Snapshot capture failed: {detail}")
+    return out
+
+
+@router.get("/{camera_id}/snapshot")
+async def feed_snapshot(camera_id: int, db: Session = Depends(get_db)):
+    """Current frame JPEG from the live feed (plan §13 feeds/snapshot)."""
+    camera = db.get(Camera, camera_id)
+    if not camera:
+        raise HTTPException(404, "Camera not found")
+    if camera.status != "online":
+        raise HTTPException(503, f"Camera feed is {camera.status} — no live frame available")
+
+    now = time.time()
+    cached = _snapshot_cache.get(camera_id)
+    if cached and now - cached[0] < _SNAPSHOT_TTL:
+        jpeg = cached[1]
+    else:
+        cam_id = camera.external_id or f"cam{camera_id:02d}"
+        jpeg = await _capture_frame(cam_id)
+        _snapshot_cache[camera_id] = (now, jpeg)
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"},
+    )
