@@ -127,6 +127,18 @@ async def refresh_auth():
         return {"status": "error", "message": str(exc)}
 
 
+_http_client: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            http2=True,
+            timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
+            limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
+        )
+    return _http_client
+
 # ── HLS Proxy ────────────────────────────────────────────────────────────────
 
 @router.get("/hls/{cam_id}/index.m3u8")
@@ -135,25 +147,26 @@ async def hls_playlist(cam_id: str, request: Request):
     cam_id = cam_id.lower()
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
+    client = get_http_client()
 
-    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-        )
+    resp = await client.get(
+        upstream_url,
+        cookies={SENTINEL_COOKIE_NAME: cookie},
+        headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        follow_redirects=False,
+    )
 
     if resp.status_code == 401 or resp.status_code == 302:
         # Cookie expired — clear and retry once
         global _cached_cookie
         _cached_cookie = None
         cookie = await _get_sentinel_cookie()
-        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-            resp = await client.get(
-                upstream_url,
-                cookies={SENTINEL_COOKIE_NAME: cookie},
-                headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-            )
+        resp = await client.get(
+            upstream_url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+            follow_redirects=False,
+        )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
@@ -199,15 +212,15 @@ async def hls_enc_key(cam_id: str):
     The key URI (/enc.key) is shared across all cameras on the CDN.
     """
     cookie = await _get_sentinel_cookie()
-    # Key is at /enc.key on the CDN root, not per-camera
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/enc.key"
+    client = get_http_client()
 
-    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-        )
+    resp = await client.get(
+        upstream_url,
+        cookies={SENTINEL_COOKIE_NAME: cookie},
+        headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        follow_redirects=False,
+    )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, "Encryption key not found")
@@ -231,13 +244,15 @@ async def hls_segment(cam_id: str, segment: str):
 
     cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
+    client = get_http_client()
 
-    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
-        )
+    resp = await client.get(
+        upstream_url,
+        cookies={SENTINEL_COOKIE_NAME: cookie},
+        headers={"User-Agent": "GujIVMS/1.0 HLS-Proxy"},
+        follow_redirects=False,
+        timeout=30.0,
+    )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Segment not found: {segment}")
