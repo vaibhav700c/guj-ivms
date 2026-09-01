@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import {
   Video, Activity, Siren, Database, TrendingUp, Car,
   CircleAlert, Cpu, CheckCircle, AlertTriangle, ArrowRight,
-  Play, Eye,
+  Play, Eye, PlayCircle, StopCircle, RefreshCw,
 } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
@@ -18,6 +18,9 @@ interface Overview {
   detections_24h: number; watchlist_active: number; registry_vehicles: number;
 }
 interface AlertItem { id: number; severity: string; message: string; status: string; timestamp: string; camera_name: string | null; }
+interface AlertStats { by_status: Record<string, number>; by_severity: Record<string, number>; total: number; unacknowledged: number; }
+interface TierItem { tier: string; count: number; description: string; }
+interface SimStatus { running: boolean; events_generated: number; alerts_generated: number; }
 
 const SEV: Record<string, string> = {
   critical: "badge-critical", high: "badge-high", medium: "badge-medium", low: "badge-low",
@@ -75,19 +78,30 @@ const TT_STYLE = {
   background: "#0d1a2e", border: "1px solid #1e3352", borderRadius: 10, fontSize: 11, color: "#cbd5e1",
 };
 
+const TIER_META: Record<string, { color: string; label: string; desc: string }> = {
+  A: { color: "#f97316", label: "Tier A", desc: "Full ANPR + Face" },
+  B: { color: "#06b6d4", label: "Tier B", desc: "Detection + Track" },
+  C: { color: "#475569", label: "Tier C", desc: "Presence / Health" },
+};
+
 export default function Dashboard() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [timeline, setTimeline] = useState<{ bucket: string; count: number }[]>([]);
   const [traffic, setTraffic] = useState<{ camera: string; city: string; events: number }[]>([]);
-  const [simStatus, setSimStatus] = useState<{ running: boolean; events_generated: number; alerts_generated: number } | null>(null);
+  const [simStatus, setSimStatus] = useState<SimStatus | null>(null);
+  const [alertStats, setAlertStats] = useState<AlertStats | null>(null);
+  const [tiers, setTiers] = useState<TierItem[]>([]);
+  const [simLoading, setSimLoading] = useState(false);
 
   const refresh = () => {
     api<Overview>("/analytics/overview").then(setOv).catch(() => undefined);
-    api<{ items: AlertItem[] }>("/alerts?limit=8&status=open").then((r) => setAlerts(r.items)).catch(() => undefined);
+    api<{ items: AlertItem[] }>("/alerts?limit=8&status=new").then((r) => setAlerts(r.items)).catch(() => undefined);
     api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=12").then(setTimeline).catch(() => undefined);
     api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=6").then(setTraffic).catch(() => undefined);
-    api<typeof simStatus>("/simulator/status").then(setSimStatus).catch(() => undefined);
+    api<SimStatus>("/simulator/status").then(setSimStatus).catch(() => undefined);
+    api<AlertStats>("/alerts/stats").then(setAlertStats).catch(() => undefined);
+    api<TierItem[]>("/analytics/tiers/coverage").then(setTiers).catch(() => undefined);
   };
 
   useEffect(() => {
@@ -96,8 +110,31 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, []);
 
+  const toggleSim = async () => {
+    if (!simStatus) return;
+    setSimLoading(true);
+    try {
+      if (simStatus.running) {
+        await api("/simulator/stop", { method: "POST" });
+      } else {
+        await api("/simulator/start", { method: "POST" });
+      }
+      const s = await api<SimStatus>("/simulator/status");
+      setSimStatus(s);
+    } finally {
+      setSimLoading(false);
+    }
+  };
+
   const onlinePct = ov ? Math.round((ov.cameras_online / Math.max(ov.cameras_total, 1)) * 100) : 0;
   const now = new Date();
+
+  // Build tier display — real DB data, fallback to [] if not loaded yet
+  const tierDisplay = ["A", "B", "C"].map((t) => {
+    const found = tiers.find((x) => x.tier === t);
+    const meta = TIER_META[t];
+    return { ...meta, cameras: found?.count ?? "…" };
+  });
 
   return (
     <div className="space-y-6 max-w-[1500px] animate-fade-in">
@@ -107,7 +144,7 @@ export default function Dashboard() {
         <div>
           <h1 className="page-title">Control Room Dashboard</h1>
           <p className="page-subtitle">
-            Gujarat Integrated Video Management & Analytics ·{" "}
+            Gujarat Integrated Video Management &amp; Analytics ·{" "}
             {now.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </p>
         </div>
@@ -120,6 +157,27 @@ export default function Dashboard() {
           </Link>
         </div>
       </div>
+
+      {/* ── Alert stats strip ─────────────────────────────────────── */}
+      {alertStats && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            { label: "New / Unacknowledged", value: alertStats.by_status?.new ?? 0, color: "text-red-400", bg: "bg-red-500/10 border-red-500/20", icon: Siren },
+            { label: "Acknowledged", value: alertStats.by_status?.acknowledged ?? 0, color: "text-amber-400", bg: "bg-amber-500/10 border-amber-500/20", icon: CheckCircle },
+            { label: "Resolved Today", value: alertStats.by_status?.resolved ?? 0, color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20", icon: CheckCircle },
+            { label: "False Positives", value: alertStats.by_status?.false_positive ?? 0, color: "text-slate-400", bg: "bg-slate-500/10 border-slate-500/20", icon: AlertTriangle },
+          ].map((s) => (
+            <Link key={s.label} to="/alerts"
+              className={`rounded-xl border p-3 flex items-center gap-3 transition-all hover:scale-[1.02] cursor-pointer ${s.bg}`}>
+              <s.icon size={18} className={s.color} />
+              <div>
+                <div className={`text-xl font-bold ${s.color}`}>{s.value.toLocaleString("en-IN")}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">{s.label}</div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
 
       {/* ── Stat row ─────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -231,6 +289,9 @@ export default function Dashboard() {
               <Database size={14} className="text-cyan-400" />
               Top Camera Volumes
             </div>
+            <Link to="/analytics" className="text-xs text-orange-400/80 hover:text-orange-400 flex items-center gap-1">
+              ANPR details <ArrowRight size={11} />
+            </Link>
           </div>
           <div className="h-52 p-4">
             <ResponsiveContainer width="100%" height="100%">
@@ -254,6 +315,9 @@ export default function Dashboard() {
               <Cpu size={14} className="text-violet-400" />
               System Health
             </div>
+            <button onClick={refresh} className="btn-icon" title="Refresh now">
+              <RefreshCw size={12} />
+            </button>
           </div>
           <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
@@ -266,9 +330,10 @@ export default function Dashboard() {
                 ok: true, sub: `${ov?.cameras_online ?? "—"} online`,
               },
               {
-                label: "Alert Simulator", value: simStatus?.running ? "Running" : "Stopped",
+                label: "Alert Simulator",
+                value: simStatus?.running ? "Running" : "Stopped",
                 ok: simStatus?.running ?? false,
-                sub: simStatus ? `${simStatus.events_generated} events generated` : "…",
+                sub: simStatus ? `${simStatus.events_generated} events · ${simStatus.alerts_generated} alerts` : "…",
               },
               {
                 label: "Watchlist Engine", value: "Active",
@@ -289,17 +354,40 @@ export default function Dashboard() {
             ))}
           </div>
 
-          {/* Tier breakdown */}
-          <div className="px-4 pb-4">
-            <div className="glow-divider mb-3" />
+          {/* Simulator control + tier breakdown */}
+          <div className="px-4 pb-4 space-y-3">
+            <div className="glow-divider" />
+
+            {/* Simulator start/stop */}
+            <div className="flex items-center justify-between bg-control-850 rounded-xl px-4 py-3 border border-control-800/50">
+              <div>
+                <div className="text-xs font-semibold text-slate-300">Analytics Simulator</div>
+                <div className="text-[10px] text-slate-600 mt-0.5">
+                  {simStatus
+                    ? `${simStatus.events_generated.toLocaleString("en-IN")} events generated · ${simStatus.alerts_generated} alerts fired`
+                    : "Loading…"}
+                </div>
+              </div>
+              <button
+                onClick={toggleSim}
+                disabled={simLoading || !simStatus}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  simStatus?.running
+                    ? "bg-red-500/15 text-red-400 border border-red-500/25 hover:bg-red-500/25"
+                    : "bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 hover:bg-emerald-500/25"
+                } disabled:opacity-40`}
+              >
+                {simStatus?.running
+                  ? <><StopCircle size={13} /> Stop Simulator</>
+                  : <><PlayCircle size={13} /> Start Simulator</>}
+              </button>
+            </div>
+
+            {/* Tier breakdown — real DB data */}
             <div className="grid grid-cols-3 gap-2 text-center">
-              {[
-                { tier: "A", desc: "Full ANPR + Face", color: "#f97316", cameras: 10 },
-                { tier: "B", desc: "Detection + Track", color: "#06b6d4", cameras: 12 },
-                { tier: "C", desc: "Presence / Health", color: "#475569", cameras: 8 },
-              ].map((t) => (
-                <div key={t.tier} className="bg-control-850 rounded-xl p-2.5 border border-control-800/50">
-                  <div className="text-lg font-bold" style={{ color: t.color }}>Tier {t.tier}</div>
+              {tierDisplay.map((t) => (
+                <div key={t.label} className="bg-control-850 rounded-xl p-2.5 border border-control-800/50">
+                  <div className="text-lg font-bold" style={{ color: t.color }}>{t.label}</div>
                   <div className="text-xs font-semibold text-slate-300">{t.cameras} cams</div>
                   <div className="text-[10px] text-slate-600 mt-0.5">{t.desc}</div>
                 </div>

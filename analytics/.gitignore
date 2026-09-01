@@ -1,0 +1,5 @@
+# .gitignore for analytics
+.venv/
+models/
+*.onnx
+__pycache__/

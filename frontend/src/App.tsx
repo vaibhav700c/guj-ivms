@@ -11,6 +11,7 @@ import Vehicles from "./pages/Vehicles";
 import Alerts from "./pages/Alerts";
 import Watchlist from "./pages/Watchlist";
 import Analytics from "./pages/Analytics";
+import AnprDetections from "./pages/AnprDetections";
 import { useAuth } from "./store/auth";
 import { api } from "./lib/api";
 
@@ -55,6 +56,7 @@ export default function App() {
         <Route path="alerts" element={<Alerts />} />
         <Route path="watchlist" element={<Watchlist />} />
         <Route path="analytics" element={<Analytics />} />
+        <Route path="anpr" element={<AnprDetections />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

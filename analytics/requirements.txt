@@ -1,8 +1,13 @@
-# Optional — only needed to run the real ML analytics worker against
-# live RTSP streams. The cloud deployment (Render/Vercel) does not install this.
-# opencv-python-headless
-# ultralytics            # YOLOv8 detection
-# paddleocr paddlepaddle # Indian plate OCR
-# onnxruntime            # SCRFD/ArcFace via insightface export
-# bytetrack              # multi-object tracking
-httpx>=0.28.1
+# Real ML analytics worker (plan §5 / §6 — YOLOv8 + ByteTrack + plate OCR + ArcFace)
+# CPU-only; runs on any machine with network access to the Sentinel RTSP gateway.
+# Python 3.11 or 3.12 required (torch/opencv wheels).
+ultralytics>=8.3.0            # YOLOv8 detection (vehicle/person) — pulls torch
+supervision>=0.22.0           # ByteTrack multi-object tracking
+av>=18.0.0                    # FFmpeg bindings — reliable RTSP/TCP capture
+fast-plate-ocr>=1.0.0         # license-plate OCR (ONNX, CPU)
+onnxruntime>=1.19.0           # ONNX inference runtime
+httpx>=0.28.1                 # ingest API client
+numpy<2                       # torch 2.2 (last macOS x86 build) + ultralytics Darwin constraint
+polars>=0.20.0,<0.21          # ultralytics dep — newer polars (>=1.x) requires numpy>=2
+# Optional — real face recognition (plan §6). Large model download (~330 MB):
+# insightface>=0.7.3          # SCRFD detection + ArcFace embeddings

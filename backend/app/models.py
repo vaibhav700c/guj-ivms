@@ -115,6 +115,9 @@ class WatchlistEntry(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Real face-recognition gallery (plan §6): 512-d ArcFace embedding enrolled
+    # via POST /watchlist/{id}/enroll-face or the edge worker `enroll` command.
+    reference_embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class ANPREvent(Base):

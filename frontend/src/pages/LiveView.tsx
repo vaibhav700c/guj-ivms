@@ -4,7 +4,7 @@ import {
   MonitorPlay, Maximize2, WifiOff, Loader2, Grid2X2, Grid3X3,
   LayoutGrid, Search, X, ExternalLink, Copy, Check,
 } from "lucide-react";
-import { api, formatTime } from "../lib/api";
+import { api, formatTime, wsUrl } from "../lib/api";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 const SENTINEL_PORTAL = "https://live.sentinelgujarat.in";
@@ -159,6 +159,8 @@ export default function LiveView() {
               <X size={12} /> Back to grid
             </button>
             <StreamTile camera={focus} big clock={clock} proxyUrl={proxyHlsUrl(focus)} />
+            {/* Per-camera live analytics overlay (WS /ws/analytics/{id}) */}
+            <AnalyticsOverlay camera={focus} />
           </div>
         ) : (
           <div className={`flex-1 grid gap-2 ${GRID_CLASS[layout]}`} style={{ alignContent: "start" }}>
@@ -174,6 +176,59 @@ export default function LiveView() {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Analytics overlay: connects to /ws/analytics/{camera_id} and shows live ANPR badge ─────
+function AnalyticsOverlay({ camera }: { camera: Camera }) {
+  const [lastAnpr, setLastAnpr] = useState<{ plate: string; confidence: number; vehicle_type: string | null } | null>(null);
+  const [fadeOut, setFadeOut] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!camera.id) return;
+    const base = wsUrl().replace("/ws/alerts", "");
+    const ws = new WebSocket(`${base}/ws/analytics/${camera.id}`);
+    wsRef.current = ws;
+
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        const p = msg?.payload ?? msg;
+        if (p?.plate_text) {
+          setLastAnpr({ plate: p.plate_text, confidence: p.confidence ?? 0, vehicle_type: p.vehicle_type ?? null });
+          setFadeOut(false);
+          if (fadeTimer.current) clearTimeout(fadeTimer.current);
+          fadeTimer.current = setTimeout(() => setFadeOut(true), 4500);
+        }
+      } catch { /* ignore */ }
+    };
+    return () => { ws.close(); if (fadeTimer.current) clearTimeout(fadeTimer.current); };
+  }, [camera.id]);
+
+  if (!lastAnpr) return null;
+
+  return (
+    <div className={`absolute bottom-10 left-4 z-30 transition-opacity duration-700 ${fadeOut ? "opacity-0" : "opacity-100"}`}>
+      <div className="bg-black/80 border border-orange-500/40 rounded-xl px-4 py-2.5 backdrop-blur-sm">
+        <div className="flex items-center gap-3">
+          <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse shrink-0" />
+          <div>
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">Live ANPR Detection</div>
+            <div className="font-mono text-xl font-bold text-orange-400 tracking-widest">{lastAnpr.plate}</div>
+            <div className="flex items-center gap-2 mt-0.5">
+              {lastAnpr.vehicle_type && (
+                <span className="text-[10px] text-cyan-400 capitalize">{lastAnpr.vehicle_type}</span>
+              )}
+              <span className="text-[10px] font-mono text-slate-500">
+                {(lastAnpr.confidence * 100).toFixed(1)}% conf
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -33,6 +33,11 @@ class WatchlistUpdate(BaseModel):
     police_station: str | None = None
 
 
+class EnrollFace(BaseModel):
+    """ArcFace 512-d embedding computed by the edge worker (`worker.py enroll`)."""
+    embedding: list[float]
+
+
 def serialize(w: WatchlistEntry) -> dict:
     return {
         "id": w.id,
@@ -45,6 +50,7 @@ def serialize(w: WatchlistEntry) -> dict:
         "police_station": w.police_station,
         "active": w.active,
         "created_at": w.created_at.isoformat() if w.created_at else None,
+        "face_enrolled": bool(w.reference_embedding),
     }
 
 
@@ -165,6 +171,34 @@ async def bulk_import(request: Request, db: Session = Depends(get_db),
     }
 
 
+@router.post("/{entry_id}/enroll-face")
+def enroll_face(entry_id: int, payload: EnrollFace, db: Session = Depends(get_db),
+                _: object = Depends(get_current_user)):
+    """Store a reference ArcFace embedding on a watchlist person (plan §6).
+
+    The edge analytics worker computes the embedding from a reference photo
+    (`python worker.py enroll --entry-id N --image photo.jpg`); the correlation
+    engine then matches live face detections against this gallery by cosine
+    similarity.
+    """
+    entry = db.get(WatchlistEntry, entry_id)
+    if not entry:
+        raise HTTPException(404, "Watchlist entry not found")
+    if entry.subject_type != "person":
+        raise HTTPException(400, "Face enrollment requires a person entry")
+    if len(payload.embedding) < 64:
+        raise HTTPException(422, f"Embedding too small ({len(payload.embedding)} dims) — expected 512-d ArcFace")
+    entry.reference_embedding = payload.embedding
+    db.commit()
+    db.refresh(entry)
+    return {
+        "id": entry.id,
+        "identifier": entry.identifier,
+        "embedding_dim": len(payload.embedding),
+        "status": "enrolled",
+    }
+
+
 @router.patch("/{entry_id}")
 def update_entry(entry_id: int, payload: WatchlistUpdate, db: Session = Depends(get_db),
                  _: object = Depends(get_current_user)):
@@ -184,5 +218,9 @@ def delete_entry(entry_id: int, db: Session = Depends(get_db),
     entry = db.get(WatchlistEntry, entry_id)
     if not entry:
         raise HTTPException(404, "Watchlist entry not found")
+    # Keep historical alerts intact — detach them instead of cascading the FK
+    from app.models import Alert
+    db.query(Alert).filter(Alert.watchlist_id == entry_id).update(
+        {Alert.watchlist_id: None})
     db.delete(entry)
     db.commit()

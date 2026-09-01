@@ -84,10 +84,19 @@ class AlertEngine:
     def evaluate_person_event(
         self, db: Session, camera_id: int, name: str, confidence: float,
         snapshot_ref: str | None = None,
+        embedding: list[float] | None = None,
+        matched_watchlist_id: int | None = None,
+        similarity: float | None = None,
     ) -> Alert | None:
-        """Face-recognition correlation (plan §6): person detection vs wanted/missing."""
-        import random
+        """Face-recognition correlation (plan §6).
 
+        Three tiers, in priority order:
+        1. `matched_watchlist_id` — the edge worker already ran gallery search
+           on-device (real ArcFace 512-d embeddings); trust and record it.
+        2. `embedding` — center-side cosine similarity against enrolled
+           `reference_embedding`s (real matching on server).
+        3. Token/name fallback — demo-mode matching for the simulator.
+        """
         entries = (
             db.query(WatchlistEntry)
             .filter(
@@ -96,32 +105,68 @@ class AlertEngine:
             )
             .all()
         )
+
         match: WatchlistEntry | None = None
-        for entry in entries:
-            # Simulated InsightFace embedding similarity — high-confidence fuzzy name match
-            token_match = any(
-                tok in entry.identifier.lower() for tok in name.lower().split() if len(tok) > 3
-            )
-            if token_match or random.random() < 0.02:
-                match = entry
-                break
+        sim_used: float | None = similarity
+        match_mode = "demo"
+
+        if matched_watchlist_id is not None:
+            match = next((e for e in entries if e.id == matched_watchlist_id), None)
+            match_mode = "edge-arcface"
+        elif embedding:
+            import math
+
+            def _cos(a: list[float], b: list[float]) -> float:
+                num = sum(x * y for x, y in zip(a, b))
+                da = math.sqrt(sum(x * x for x in a))
+                db_ = math.sqrt(sum(y * y for y in b))
+                return num / (da * db_ + 1e-9)
+
+            best_sim = 0.0
+            for entry in entries:
+                ref = entry.reference_embedding
+                if not ref or len(ref) != len(embedding):
+                    continue
+                sim = _cos(embedding, ref)
+                if sim > best_sim:
+                    best_sim, match = sim, entry
+            if match and best_sim >= 0.45:
+                sim_used = round(best_sim, 3)
+                match_mode = "center-arcface"
+            else:
+                match = None
+        if match is None and embedding is None:
+            # Demo fallback (simulator): simulated InsightFace similarity —
+            # token overlap on name, tiny random hit rate.
+            import random
+
+            for entry in entries:
+                token_match = any(
+                    tok in entry.identifier.lower()
+                    for tok in name.lower().split() if len(tok) > 3
+                )
+                if token_match or random.random() < 0.02:
+                    match = entry
+                    break
+
         if match is None:
             return None
 
         camera = db.get(Camera, camera_id)
+        similarity_note = f" · ArcFace cos {sim_used:.2f}" if sim_used else ""
         alert = Alert(
             alert_type="watchlist_person",
             severity=match.severity,
             camera_id=camera_id,
             watchlist_id=match.id,
-            detected_identifier=name,
-            match_confidence=round(confidence, 2),
+            detected_identifier=name or match.identifier,
+            match_confidence=round(sim_used, 3) if sim_used else round(confidence, 2),
             snapshot_ref=snapshot_ref,
             message=(
                 f"{'WANTED' if match.category == 'wanted_person' else 'MISSING'} person "
                 f"{match.identifier} matched by face recognition at "
                 f"{camera.name if camera else 'camera #' + str(camera_id)} "
-                f"(InsightFace sim {confidence:.2f})"
+                f"({match_mode}{similarity_note})"
             ),
             status="new",
             timestamp=datetime.now(timezone.utc),

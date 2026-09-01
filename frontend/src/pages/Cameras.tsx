@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Search, Video, CircleDot, Copy, Check, Wifi, ArrowUpDown } from "lucide-react";
-import { api } from "../lib/api";
+import { Search, Video, CircleDot, Copy, Check, Wifi, ArrowUpDown, X, Activity, Clock, Cpu } from "lucide-react";
+import { api, formatDateTime } from "../lib/api";
 
 interface Camera {
   id: number; external_id: string | null; name: string;
@@ -9,6 +9,18 @@ interface Camera {
   resolution: string | null; stream_url: string | null;
   rtsp_url: string | null; whep_url: string | null;
   stream_protocol: string | null; vms_vendor: string | null;
+  latitude: number; longitude: number; address: string | null;
+  has_ir: boolean; has_ptz: boolean;
+}
+
+interface HealthLog {
+  time: string; status: string; fps_actual: number | null;
+  latency_ms: number | null; packet_loss: number | null; error_message: string | null;
+}
+
+interface AnprEvent {
+  id: number; plate_text: string; vehicle_type: string | null;
+  confidence: number; timestamp: string; direction: string | null;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -43,6 +55,168 @@ function CopyBtn({ text }: { text: string }) {
 
 type SortKey = "name" | "city" | "status" | "analytics_tier" | "health_score";
 
+function CameraDrawer({ camera, onClose }: { camera: Camera; onClose: () => void }) {
+  const [healthLog, setHealthLog] = useState<HealthLog[]>([]);
+  const [anprEvents, setAnprEvents] = useState<AnprEvent[]>([]);
+  const [loadingHealth, setLoadingHealth] = useState(true);
+
+  useEffect(() => {
+    setLoadingHealth(true);
+    Promise.all([
+      api<{ items: HealthLog[] }>(`/cameras/${camera.id}/health-log?limit=20`)
+        .then((r) => setHealthLog(r.items)).catch(() => undefined),
+      api<{ items: AnprEvent[] }>(`/analytics/anpr?camera_id=${camera.id}&hours=24&limit=10`)
+        .then((r) => setAnprEvents(r.items)).catch(() => undefined),
+    ]).finally(() => setLoadingHealth(false));
+  }, [camera.id]);
+
+  const lastHealth = healthLog[0];
+  const uptime = healthLog.length
+    ? Math.round((healthLog.filter((h) => h.status === "online").length / healthLog.length) * 100)
+    : null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
+      <div
+        className="w-full max-w-sm h-full bg-control-900 border-l border-control-800 flex flex-col overflow-hidden animate-slide-in-up shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="p-4 border-b border-control-800 flex items-start justify-between">
+          <div>
+            <div className="text-sm font-bold text-white">{camera.name}</div>
+            <div className="text-[10px] font-mono text-slate-500 mt-0.5">{camera.external_id} · {camera.vms_vendor}</div>
+          </div>
+          <button onClick={onClose} className="btn-icon"><X size={14} /></button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+
+          {/* Status row */}
+          <div className="flex flex-wrap gap-2">
+            <span className={`${STATUS_BADGE[camera.status] ?? STATUS_BADGE.unknown} capitalize flex items-center gap-1`}>
+              <CircleDot size={9} /> {camera.status}
+            </span>
+            <span className={TIER_BADGE[camera.analytics_tier] ?? TIER_BADGE.C} title={TIER_DESC[camera.analytics_tier]}>
+              Tier {camera.analytics_tier}
+            </span>
+            {camera.has_ir && <span className="badge bg-violet-500/15 text-violet-400 border border-violet-500/20">IR</span>}
+            {camera.has_ptz && <span className="badge bg-cyan-500/15 text-cyan-400 border border-cyan-500/20">PTZ</span>}
+          </div>
+
+          {/* Info grid */}
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            {[
+              { label: "City", value: camera.city },
+              { label: "District", value: camera.district },
+              { label: "Type", value: camera.camera_type },
+              { label: "Resolution", value: camera.resolution },
+              { label: "Health Score", value: camera.health_score != null ? `${Math.round(camera.health_score * 100)}%` : "—" },
+              { label: "Protocol", value: camera.stream_protocol },
+            ].map(({ label, value }) => (
+              <div key={label} className="bg-control-850 rounded-lg p-2 border border-control-800/50">
+                <div className="text-[9px] text-slate-600 uppercase tracking-wider mb-0.5">{label}</div>
+                <div className="text-slate-300 font-medium">{value ?? "—"}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Stream URLs */}
+          {(camera.stream_url || camera.rtsp_url) && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] text-slate-600 uppercase tracking-wider font-semibold">Stream URLs</div>
+              {camera.stream_url && (
+                <div className="flex items-center gap-2 bg-control-850 rounded-lg px-3 py-2 border border-control-800/50">
+                  <Wifi size={10} className="text-emerald-400 shrink-0" />
+                  <span className="font-mono text-[10px] text-emerald-400 truncate flex-1">{camera.stream_url}</span>
+                  <CopyBtn text={camera.stream_url} />
+                </div>
+              )}
+              {camera.rtsp_url && (
+                <div className="flex items-center gap-2 bg-control-850 rounded-lg px-3 py-2 border border-control-800/50">
+                  <Video size={10} className="text-cyan-400 shrink-0" />
+                  <span className="font-mono text-[10px] text-cyan-400 truncate flex-1">{camera.rtsp_url}</span>
+                  <CopyBtn text={camera.rtsp_url} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Health log */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-[10px] text-slate-600 uppercase tracking-wider font-semibold">
+              <Activity size={10} /> Health Log (last 20 samples)
+            </div>
+            {loadingHealth ? (
+              <div className="text-xs text-slate-600 py-2">Loading…</div>
+            ) : healthLog.length === 0 ? (
+              <div className="text-xs text-slate-600 py-2">No health data recorded yet.</div>
+            ) : (
+              <>
+                {uptime !== null && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-slate-500">Uptime:</span>
+                    <div className="flex-1 h-1.5 bg-control-800 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all"
+                        style={{ width: `${uptime}%`, background: uptime > 80 ? "#10b981" : uptime > 50 ? "#f59e0b" : "#ef4444" }} />
+                    </div>
+                    <span className="font-mono text-slate-400">{uptime}%</span>
+                  </div>
+                )}
+                {lastHealth && (
+                  <div className="grid grid-cols-3 gap-1.5 text-center">
+                    {[
+                      { icon: Cpu, label: "FPS", value: lastHealth.fps_actual?.toFixed(1) ?? "—", color: "text-cyan-400" },
+                      { icon: Clock, label: "Latency", value: lastHealth.latency_ms ? `${lastHealth.latency_ms}ms` : "—", color: "text-orange-400" },
+                      { icon: Activity, label: "Loss", value: lastHealth.packet_loss ? `${(lastHealth.packet_loss * 100).toFixed(1)}%` : "0%", color: "text-violet-400" },
+                    ].map(({ icon: Icon, label, value, color }) => (
+                      <div key={label} className="bg-control-850 rounded-lg p-2 border border-control-800/50">
+                        <Icon size={12} className={`mx-auto mb-1 ${color}`} />
+                        <div className={`text-sm font-bold ${color}`}>{value}</div>
+                        <div className="text-[9px] text-slate-600">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="space-y-0.5 max-h-32 overflow-y-auto">
+                  {healthLog.map((h, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[10px] font-mono text-slate-500">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${h.status === "online" ? "bg-emerald-500" : "bg-red-500"}`} />
+                      <span className="text-slate-600">{formatDateTime(h.time)}</span>
+                      <span className="text-slate-500">{h.fps_actual != null ? `${h.fps_actual.toFixed(1)} fps` : ""}</span>
+                      <span className="text-slate-700">{h.latency_ms != null ? `${h.latency_ms}ms` : ""}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Recent ANPR events */}
+          {camera.analytics_tier === "A" || camera.analytics_tier === "B" ? (
+            <div className="space-y-2">
+              <div className="text-[10px] text-slate-600 uppercase tracking-wider font-semibold">Recent ANPR (24h)</div>
+              {anprEvents.length === 0 ? (
+                <div className="text-xs text-slate-600">No ANPR events in last 24h.</div>
+              ) : (
+                <div className="space-y-0.5 max-h-32 overflow-y-auto">
+                  {anprEvents.map((e) => (
+                    <div key={e.id} className="flex items-center gap-2 bg-control-850 rounded-lg px-2.5 py-1.5 border border-control-800/50">
+                      <span className="font-mono text-xs text-orange-400 font-semibold">{e.plate_text}</span>
+                      <span className="text-[10px] text-slate-600 ml-auto">{formatDateTime(e.timestamp)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Cameras() {
   const [items, setItems] = useState<Camera[]>([]);
   const [total, setTotal] = useState(0);
@@ -52,6 +226,7 @@ export default function Cameras() {
   const [cities, setCities] = useState<string[]>([]);
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortAsc, setSortAsc] = useState(true);
+  const [drawerCam, setDrawerCam] = useState<Camera | null>(null);
 
   useEffect(() => {
     api<{ by_city: Record<string, number> }>("/cameras/stats")
@@ -102,7 +277,7 @@ export default function Cameras() {
         <div>
           <h1 className="page-title">Camera Registry</h1>
           <p className="page-subtitle">
-            Sentinel Grid · {total} cameras · {online} online · {offline} offline
+            Sentinel Grid · {total} cameras · {online} online · {offline} offline · Click any row for details
           </p>
         </div>
         <div className="flex gap-2">
@@ -152,7 +327,9 @@ export default function Cameras() {
             </thead>
             <tbody className="divide-y divide-control-800/40">
               {sorted.map((c) => (
-                <tr key={c.id} className={`table-row ${STATUS_ROW[c.status] ?? ""}`}>
+                <tr key={c.id}
+                  className={`table-row cursor-pointer ${STATUS_ROW[c.status] ?? ""}`}
+                  onClick={() => setDrawerCam(c)}>
                   <td className="table-cell">
                     <div className="flex items-center gap-2">
                       <div className={`w-1.5 h-6 rounded-full shrink-0 ${c.status === "online" ? "bg-emerald-500" : c.status === "offline" ? "bg-red-500" : "bg-amber-500"}`} />
@@ -174,7 +351,7 @@ export default function Cameras() {
                       Tier {c.analytics_tier}
                     </span>
                   </td>
-                  <td className="table-cell">
+                  <td className="table-cell" onClick={(e) => e.stopPropagation()}>
                     <div className="flex flex-col gap-1">
                       {c.stream_url && (
                         <div className="flex items-center gap-1">
@@ -221,6 +398,9 @@ export default function Cameras() {
           </table>
         </div>
       </div>
+
+      {/* Camera detail drawer */}
+      {drawerCam && <CameraDrawer camera={drawerCam} onClose={() => setDrawerCam(null)} />}
     </div>
   );
 }

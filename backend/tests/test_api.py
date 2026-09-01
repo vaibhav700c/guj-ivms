@@ -179,6 +179,61 @@ def test_ingest_anpr_unknown_camera(client):
     assert r.status_code == 404
 
 
+# ── Real face-recognition correlation (plan §6 — ArcFace gallery path) ───────
+
+def test_face_enrollment_and_embedding_correlation(client):
+    # 1. Create a person entry and enroll a reference ArcFace embedding
+    r = client.post("/api/v1/watchlist", json={
+        "category": "wanted_person", "subject_type": "person",
+        "identifier": "Test Suspect (Real Face)", "severity": "critical",
+    })
+    assert r.status_code == 201
+    entry_id = r.json()["id"]
+
+    ref = [1.0] * 128  # ≥64-dim vector for the test (ArcFace is 512 in prod)
+    r = client.post(f"/api/v1/watchlist/{entry_id}/enroll-face",
+                    json={"embedding": ref})
+    assert r.status_code == 200
+    assert r.json()["status"] == "enrolled"
+    assert r.json()["embedding_dim"] == 128
+
+    # enrolled flag now shows in watchlist listing
+    items = client.get("/api/v1/watchlist").json()["items"]
+    enrolled = next(i for i in items if i["id"] == entry_id)
+    assert enrolled["face_enrolled"] is True
+
+    # 2. Edge node detects a face with a near-identical embedding → alert
+    r = client.post("/api/v1/ingest/detection", json={
+        "camera_id": 1, "event_type": "face", "confidence": 0.93,
+        "bbox": {"x": 100, "y": 80, "w": 90, "h": 120},
+        "metadata": {"embedding": ref, "face_name": "unknown face"},
+    })
+    assert r.status_code == 201
+    body = r.json()
+    assert body["correlation"] == "alert_created"
+    assert body["alert_id"] is not None
+
+    # 3. A face with an orthogonal/dissimilar embedding → no alert
+    r = client.post("/api/v1/ingest/detection", json={
+        "camera_id": 1, "event_type": "face", "confidence": 0.9,
+        "metadata": {"embedding": [1.0] + [0.0] * 127, "face_name": "unknown face"},
+    })
+    assert r.json()["correlation"] == "no_match"
+
+    # 4. Enrollment rejects vehicle entries
+    r = client.post("/api/v1/watchlist", json={
+        "category": "stolen_vehicle", "subject_type": "vehicle",
+        "identifier": "GJ 55 NN 5555",
+    })
+    vid = r.json()["id"]
+    assert client.post(f"/api/v1/watchlist/{vid}/enroll-face",
+                       json={"embedding": ref}).status_code == 400
+
+    # cleanup
+    client.delete(f"/api/v1/watchlist/{entry_id}")
+    client.delete(f"/api/v1/watchlist/{vid}")
+
+
 # ── Vehicle search & journey reconstruction (plan §7 / §20.2) ────────────────
 
 def test_vehicle_journey_reconstruction(client):

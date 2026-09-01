@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, Trash2, ListChecks } from "lucide-react";
+import { Plus, Trash2, ListChecks, Upload, X, FileText } from "lucide-react";
 import { api } from "../lib/api";
 
 interface Entry {
@@ -29,9 +29,18 @@ const CAT_LABEL: Record<string, string> = {
   custom: "Custom",
 };
 
+const SAMPLE_CSV = `category,subject_type,identifier,severity,description,fir_number
+stolen_vehicle,vehicle,GJ 05 BX 9012,high,Stolen from Surat market,FIR/2024/SRT/042
+wanted_person,person,Raju Desai,critical,Wanted for robbery Ahmedabad,FIR/2024/AHD/108
+stolen_vehicle,vehicle,GJ 01 KL 3344,medium,Two-wheeler theft Vadodara,FIR/2024/VDR/019`;
+
 export default function Watchlist() {
   const [items, setItems] = useState<Entry[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkResult, setBulkResult] = useState<{ created: number; skipped: number } | null>(null);
+  const [bulkLoading, setBulkLoading] = useState(false);
   const [form, setForm] = useState({
     category: "stolen_vehicle",
     subject_type: "vehicle",
@@ -72,20 +81,55 @@ export default function Watchlist() {
     load();
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setBulkText(ev.target?.result as string);
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const submitBulk = async () => {
+    if (!bulkText.trim()) return;
+    setBulkLoading(true);
+    setBulkResult(null);
+    try {
+      const isCSV = bulkText.trim().startsWith("category") || bulkText.includes(",");
+      const result = await api<{ created: number; skipped: number }>("/watchlist/bulk-import", {
+        method: "POST",
+        headers: { "Content-Type": isCSV ? "text/csv" : "application/json" },
+        body: bulkText,
+      });
+      setBulkResult(result);
+      load();
+    } catch (err) {
+      alert(`Bulk import failed: ${err}`);
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-4 max-w-[1100px]">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold">Watchlist Management</h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Continuous cross-reference feed for the alert engine
+            Continuous cross-reference feed for the alert engine · {items.filter((i) => i.active).length} active
           </p>
         </div>
-        <button className="btn-primary" onClick={() => setShowForm(!showForm)}>
-          <Plus size={15} /> Add Entry
-        </button>
+        <div className="flex gap-2">
+          <button className="btn-ghost text-xs" onClick={() => { setShowBulk(!showBulk); setShowForm(false); }}>
+            <Upload size={14} /> Bulk Import
+          </button>
+          <button className="btn-primary" onClick={() => { setShowForm(!showForm); setShowBulk(false); }}>
+            <Plus size={15} /> Add Entry
+          </button>
+        </div>
       </div>
 
+      {/* Single add form */}
       {showForm && (
         <form onSubmit={add} className="card p-4 grid grid-cols-2 md:grid-cols-3 gap-3">
           <select className="input" value={form.category}
@@ -109,6 +153,51 @@ export default function Watchlist() {
             onChange={(e) => setForm({ ...form, description: e.target.value })} />
           <button className="btn-primary col-span-2 md:col-span-3 justify-center">Save Entry</button>
         </form>
+      )}
+
+      {/* Bulk import panel */}
+      {showBulk && (
+        <div className="card p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <FileText size={14} className="text-orange-400" /> Bulk Import
+            </div>
+            <button onClick={() => setShowBulk(false)} className="btn-icon"><X size={13} /></button>
+          </div>
+          <p className="text-xs text-slate-500">
+            Paste CSV or JSON array below, or upload a file. CSV columns:{" "}
+            <code className="font-mono text-orange-400">category, subject_type, identifier, severity, description, fir_number</code>
+          </p>
+
+          {/* File upload */}
+          <div className="flex items-center gap-3">
+            <label className="btn-ghost text-xs cursor-pointer">
+              <Upload size={12} /> Choose File (.csv / .json)
+              <input type="file" accept=".csv,.json,.txt" className="hidden" onChange={handleFileUpload} />
+            </label>
+            <button className="btn-ghost text-xs" onClick={() => setBulkText(SAMPLE_CSV)}>
+              Load sample CSV
+            </button>
+          </div>
+
+          <textarea
+            className="input w-full font-mono text-xs"
+            rows={8}
+            placeholder={"Paste CSV or JSON array here…\n\nCSV example:\ncategory,subject_type,identifier,severity\nstolen_vehicle,vehicle,GJ 01 AB 1234,high"}
+            value={bulkText}
+            onChange={(e) => setBulkText(e.target.value)}
+          />
+
+          {bulkResult && (
+            <div className={`text-xs rounded-lg px-3 py-2 ${bulkResult.created > 0 ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-amber-500/10 text-amber-400 border border-amber-500/20"}`}>
+              ✓ Created {bulkResult.created} entries · Skipped {bulkResult.skipped} (duplicates or invalid)
+            </div>
+          )}
+
+          <button className="btn-primary" disabled={bulkLoading || !bulkText.trim()} onClick={submitBulk}>
+            {bulkLoading ? "Importing…" : "Import Now"}
+          </button>
+        </div>
       )}
 
       <div className="card overflow-hidden">

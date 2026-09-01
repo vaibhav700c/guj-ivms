@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Video, MonitorPlay, Map as MapIcon,
   Car, Siren, ListChecks, BarChart3, ShieldCheck, LogOut,
-  Bell, BellOff, Wifi, WifiOff, ChevronRight,
+  Bell, BellOff, Wifi, WifiOff, ChevronRight, ScanLine,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../store/auth";
@@ -15,6 +15,7 @@ const NAV = [
   { to: "/map",       label: "GIS Map",         icon: MapIcon },
   { to: "/vehicles",  label: "Vehicle Search",  icon: Car },
   { to: "/alerts",    label: "Live Alerts",     icon: Siren },
+  { to: "/anpr",      label: "ANPR Detections", icon: ScanLine },
   { to: "/watchlist", label: "Watchlist",        icon: ListChecks },
   { to: "/analytics", label: "Analytics",        icon: BarChart3 },
 ];

@@ -95,4 +95,27 @@ def ingest_detection(payload: DetectionIngest, db: Session = Depends(get_db),
     )
     db.add(det)
     db.commit()
-    return {"event_id": det.id, "status": "logged"}
+    db.refresh(det)
+
+    # Real face-recognition correlation (plan §6): edge workers push face
+    # detections with ArcFace embeddings in `metadata`; the center correlates
+    # them against the enrolled watchlist gallery and raises alerts.
+    alert = None
+    if payload.event_type == "face":
+        alert = alert_engine.evaluate_person_event(
+            db,
+            camera_id=payload.camera_id,
+            name=payload.metadata.get("face_name") or "unknown face",
+            confidence=payload.confidence,
+            snapshot_ref=payload.metadata.get("snapshot_ref"),
+            embedding=payload.metadata.get("embedding"),
+            matched_watchlist_id=payload.metadata.get("matched_watchlist_id"),
+            similarity=payload.metadata.get("similarity"),
+        )
+
+    return {
+        "event_id": det.id,
+        "status": "logged",
+        "alert_id": alert.id if alert else None,
+        "correlation": "alert_created" if alert else "no_match",
+    }
