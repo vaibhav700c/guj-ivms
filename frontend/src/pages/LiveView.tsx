@@ -35,7 +35,10 @@ const proxyHlsUrl = (cam: Camera): string | null => {
 export default function LiveView() {
   const [allCams, setAllCams] = useState<Camera[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [layout, setLayout] = useState<LayoutKey>("3×3");
+  // 2x2 by default: the CDN sits behind Cloudflare, which rate-limits by source
+  // IP, and the backend proxies every viewer through one address. Fewer tiles
+  // opening at once keeps the grid reliable; operators can still switch up.
+  const [layout, setLayout] = useState<LayoutKey>("2×2");
   const [clock, setClock] = useState(new Date());
   const [focus, setFocus] = useState<Camera | null>(null);
   const [search, setSearch] = useState("");
@@ -45,7 +48,7 @@ export default function LiveView() {
       .then((r) => {
         const cams = r.items.filter((c) => c.stream_url);
         setAllCams(cams);
-        setSelected(new Set(cams.slice(0, 9).map((c) => c.id)));
+        setSelected(new Set(cams.slice(0, 4).map((c) => c.id)));
       })
       .catch(() => undefined);
   }, []);
@@ -162,9 +165,10 @@ export default function LiveView() {
           </div>
         ) : (
           <div className={`flex-1 grid gap-2 ${GRID_CLASS[layout]}`} style={{ alignContent: "start" }}>
-            {shown.map((c) => (
+            {shown.map((c, i) => (
               <StreamTile key={c.id} camera={c} clock={clock}
-                onExpand={() => setFocus(c)} proxyUrl={proxyHlsUrl(c)} />
+                onExpand={() => setFocus(c)} proxyUrl={proxyHlsUrl(c)}
+                startDelayMs={i * 1200} />
             ))}
             {shown.length === 0 && (
               <div className="card col-span-full p-16 flex flex-col items-center gap-3 text-slate-600">
@@ -181,12 +185,14 @@ export default function LiveView() {
 
 type TileState = "loading" | "playing" | "error" | "no-stream";
 
-function StreamTile({ camera, big, clock, onExpand, proxyUrl }: {
-  camera: Camera; big?: boolean; clock: Date; onExpand?: () => void; proxyUrl: string | null;
+function StreamTile({ camera, big, clock, onExpand, proxyUrl, startDelayMs = 0 }: {
+  camera: Camera; big?: boolean; clock: Date; onExpand?: () => void;
+  proxyUrl: string | null; startDelayMs?: number;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoff = useBackoff();
   const hlsUrl = proxyUrl ?? camera.stream_url;
   const [state, setState] = useState<TileState>(hlsUrl ? "loading" : "no-stream");
@@ -236,9 +242,22 @@ function StreamTile({ camera, big, clock, onExpand, proxyUrl }: {
       }
     }
 
-    attach();
-    return () => { hlsRef.current?.destroy(); hlsRef.current = null; if (retryTimer.current) clearTimeout(retryTimer.current); };
-  }, [hlsUrl, camera.external_id]);
+    // Stagger the first request. Opening every tile simultaneously sends a
+    // burst from the backend's single egress IP, which Cloudflare answers with
+    // 403s for most of the grid.
+    if (startDelayMs > 0) {
+      startTimer.current = setTimeout(attach, startDelayMs);
+    } else {
+      attach();
+    }
+
+    return () => {
+      hlsRef.current?.destroy();
+      hlsRef.current = null;
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+      if (startTimer.current) clearTimeout(startTimer.current);
+    };
+  }, [hlsUrl, camera.external_id, startDelayMs]);
 
   const copyRtsp = () => {
     if (camera.rtsp_url) {
