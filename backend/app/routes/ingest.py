@@ -37,6 +37,7 @@ class ANPRIngest(BaseModel):
     direction: str | None = None
     lane: int | None = None
     snapshot_ref: str | None = None
+    evidence_image: str | None = None  # base64 JPEG, the real detection frame
     timestamp: datetime | None = None
 
 
@@ -66,6 +67,7 @@ async def ingest_anpr(payload: ANPRIngest, db: Session = Depends(get_db),
         direction=payload.direction,
         lane=payload.lane,
         snapshot_ref=payload.snapshot_ref,
+        evidence_image_b64=payload.evidence_image,
         timestamp=payload.timestamp or datetime.now(timezone.utc),
     )
     db.add(event)
@@ -108,6 +110,7 @@ def ingest_detection(payload: DetectionIngest, db: Session = Depends(get_db),
             name=payload.metadata.get("face_name") or "unknown face",
             confidence=payload.confidence,
             snapshot_ref=payload.metadata.get("snapshot_ref"),
+            evidence_image=payload.metadata.get("evidence_image"),
             embedding=payload.metadata.get("embedding"),
             matched_watchlist_id=payload.metadata.get("matched_watchlist_id"),
             similarity=payload.metadata.get("similarity"),

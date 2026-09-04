@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.db import Base, SessionLocal, engine
+from app.db import Base, SessionLocal, engine, run_light_migrations
 from app.eventbus import event_bus
 from app.routes import (
     alerts,
@@ -102,6 +102,7 @@ rate_limiter = RateLimiter(limit=300, window_seconds=60)
 async def lifespan(app: FastAPI):
     # Create tables + seed demo data
     Base.metadata.create_all(bind=engine)
+    run_light_migrations(engine)
     if settings.SEED_ON_STARTUP:
         db = SessionLocal()
         try:

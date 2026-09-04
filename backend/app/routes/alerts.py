@@ -1,7 +1,9 @@
 """Alert routes — list, filter, acknowledge/resolve workflow."""
+import base64
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -34,6 +36,7 @@ def serialize(a: Alert) -> dict:
         "status": a.status,
         "acknowledged_by": a.acknowledged_by,
         "snapshot_ref": a.snapshot_ref,
+        "has_evidence_image": bool(a.evidence_image_b64),
         "timestamp": a.timestamp.isoformat() if a.timestamp else None,
         "watchlist": {
             "id": a.watchlist.id,
@@ -144,3 +147,13 @@ def update_status(alert_id: int, payload: AlertStatusUpdate, request: Request,
     write_audit(db, actor=user, action="alert.status", target_type="alert",
                 target_id=alert.id, detail={"status": alert.status}, request=request)
     return serialize(alert)
+
+
+@router.get("/{alert_id}/evidence")
+def alert_evidence(alert_id: int, db: Session = Depends(get_db),
+                   _: object = Depends(get_current_user)):
+    """The real detection frame captured by the edge worker at match time."""
+    alert = db.get(Alert, alert_id)
+    if not alert or not alert.evidence_image_b64:
+        raise HTTPException(404, "No evidence frame on file for this alert")
+    return Response(content=base64.b64decode(alert.evidence_image_b64), media_type="image/jpeg")

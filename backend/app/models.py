@@ -141,6 +141,10 @@ class ANPREvent(Base):
     lane: Mapped[int | None] = mapped_column(Integer, nullable=True)
     snapshot_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     embedding: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Real detection-frame evidence (base64 JPEG) captured by the edge worker
+    # at the moment of this specific event — distinct from snapshot_ref, which
+    # is a filesystem path only meaningful on the worker's own machine.
+    evidence_image_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     camera: Mapped["Camera"] = relationship()
@@ -173,6 +177,10 @@ class Alert(Base):
     detected_identifier: Mapped[str | None] = mapped_column(String(200), index=True)
     match_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     snapshot_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Real detection-frame evidence (base64 JPEG), captured by the edge worker
+    # at match time and carried through from the ingest payload/source event —
+    # renders directly in the UI without needing the worker's machine reachable.
+    evidence_image_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="new", index=True)
     acknowledged_by: Mapped[str | None] = mapped_column(String(100), nullable=True)

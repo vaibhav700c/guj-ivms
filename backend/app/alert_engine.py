@@ -101,6 +101,7 @@ class AlertEngine:
             detected_identifier=event.plate_text,
             match_confidence=confidence,
             snapshot_ref=event.snapshot_ref,
+            evidence_image_b64=event.evidence_image_b64,
             message=message,
             status="new",
             timestamp=datetime.now(timezone.utc),
@@ -114,6 +115,7 @@ class AlertEngine:
     def evaluate_person_event(
         self, db: Session, camera_id: int, name: str, confidence: float,
         snapshot_ref: str | None = None,
+        evidence_image: str | None = None,
         embedding: list[float] | None = None,
         matched_watchlist_id: int | None = None,
         similarity: float | None = None,
@@ -209,6 +211,7 @@ class AlertEngine:
             detected_identifier=name or match.identifier,
             match_confidence=round(sim_used, 3) if sim_used else round(confidence, 2),
             snapshot_ref=snapshot_ref,
+            evidence_image_b64=evidence_image,
             message=(
                 f"{'WANTED' if match.category == 'wanted_person' else 'MISSING'} person "
                 f"{match.identifier} matched by face recognition at "

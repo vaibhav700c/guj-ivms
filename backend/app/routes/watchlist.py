@@ -39,8 +39,8 @@ class EnrollFace(BaseModel):
     embedding: list[float]
 
 
-def serialize(w: WatchlistEntry) -> dict:
-    return {
+def serialize(w: WatchlistEntry, include_embedding: bool = False) -> dict:
+    out = {
         "id": w.id,
         "category": w.category,
         "subject_type": w.subject_type,
@@ -53,6 +53,11 @@ def serialize(w: WatchlistEntry) -> dict:
         "created_at": w.created_at.isoformat() if w.created_at else None,
         "face_enrolled": bool(w.reference_embedding),
     }
+    if include_embedding:
+        # Edge-side face gallery sync only (plan §6 tier-1 on-device matching)
+        # — never included in the default listing the frontend renders.
+        out["reference_embedding"] = w.reference_embedding
+    return out
 
 
 @router.get("")
@@ -61,6 +66,7 @@ def list_entries(
     subject_type: str | None = None,
     severity: str | None = None,
     active: bool | None = None,
+    include_embeddings: bool = False,
     db: Session = Depends(get_db),
     _: object = Depends(get_current_user),
 ):
@@ -73,7 +79,8 @@ def list_entries(
         q = q.filter(WatchlistEntry.severity == severity)
     if active is not None:
         q = q.filter(WatchlistEntry.active.is_(active))
-    return {"total": q.count(), "items": [serialize(w) for w in q.order_by(WatchlistEntry.id.desc()).all()]}
+    items = q.order_by(WatchlistEntry.id.desc()).all()
+    return {"total": q.count(), "items": [serialize(w, include_embeddings) for w in items]}
 
 
 @router.post("", status_code=201)

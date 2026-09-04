@@ -1,8 +1,12 @@
 """Database engine / session management (PostgreSQL in prod, SQLite for dev)."""
-from sqlalchemy import create_engine, event
+import logging
+
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 def normalize_database_url(url: str) -> str:
     """Render (and Heroku) hand out `postgres://` URLs, which SQLAlchemy 2 rejects.
@@ -56,3 +60,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# Base.metadata.create_all only creates tables that don't exist yet — it never
+# adds columns to a table that's already live (this project has no Alembic).
+# Production Postgres already has `alerts`/`anpr_events`/`watchlist` created
+# from earlier deploys, so a new model column needs an explicit, idempotent
+# ADD COLUMN here or every insert referencing it 500s with UndefinedColumn.
+_LIGHT_MIGRATIONS = [
+    ("anpr_events", "evidence_image_b64", "TEXT"),
+    ("alerts", "evidence_image_b64", "TEXT"),
+]
+
+
+def run_light_migrations(bind) -> None:
+    with bind.connect() as conn:
+        for table, column, coltype in _LIGHT_MIGRATIONS:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+                conn.commit()
+                logger.info("migration: added %s.%s", table, column)
+            except Exception:
+                conn.rollback()  # column already exists — expected on every later boot

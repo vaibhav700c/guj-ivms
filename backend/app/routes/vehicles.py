@@ -1,8 +1,10 @@
 """Vehicle routes — registry lookup, ANPR search, journey reconstruction (plan §7)."""
+import base64
 import math
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -88,6 +90,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
             "vehicle_type": e.vehicle_type,
             "vehicle_color": e.vehicle_color,
             "snapshot_ref": e.snapshot_ref,
+            "has_evidence_image": bool(e.evidence_image_b64),
         })
 
     # Probable (OCR-tolerant) matches — plan §20.2 step 5 (ReID/fuzzy fallback)
@@ -216,7 +219,17 @@ def last_seen(plate: str, db: Session = Depends(get_db)):
         "direction": event.direction,
         "confidence": event.confidence,
         "snapshot_ref": event.snapshot_ref,
+        "has_evidence_image": bool(event.evidence_image_b64),
     }
+
+
+@router.get("/events/{event_id}/evidence")
+def event_evidence(event_id: int, db: Session = Depends(get_db)):
+    """The real ANPR detection frame captured by the edge worker, if any."""
+    event = db.get(ANPREvent, event_id)
+    if not event or not event.evidence_image_b64:
+        raise HTTPException(404, "No evidence frame on file for this event")
+    return Response(content=base64.b64decode(event.evidence_image_b64), media_type="image/jpeg")
 
 
 @router.get("/registry/{plate}")
