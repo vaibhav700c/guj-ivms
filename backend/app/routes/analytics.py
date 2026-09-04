@@ -1,7 +1,7 @@
 """Analytics dashboard aggregates (plan §14)."""
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
@@ -189,23 +189,49 @@ def traffic_density(db: Session = Depends(get_db)):
 
 @router.get("/events")
 def generic_events(limit: int = Query(100, ge=1, le=500), event_type: str | None = None,
-                   db: Session = Depends(get_db)):
-    """Generic detection event stream (plan §13 analytics/events)."""
-    from app.models import DetectionEvent
+                   camera_id: int | None = None, db: Session = Depends(get_db)):
+    """Generic detection event stream (plan §13 analytics/events).
 
+    camera_id filtering was silently a no-op before — the param didn't exist
+    on this endpoint at all, so passing it just returned the latest N events
+    across every camera regardless.
+    """
     q = db.query(DetectionEvent)
     if event_type:
         q = q.filter(DetectionEvent.event_type == event_type)
+    if camera_id is not None:
+        q = q.filter(DetectionEvent.camera_id == camera_id)
     events = q.order_by(DetectionEvent.timestamp.desc()).limit(limit).all()
+    cam_names = {c.id: c.name for c in db.query(Camera.id, Camera.name).all()}
     return {"total": len(events), "items": [
         {
             "id": d.id,
             "camera_id": d.camera_id,
+            "camera_name": cam_names.get(d.camera_id),
             "event_type": d.event_type,
             "track_id": d.track_id,
             "confidence": d.confidence,
             "bbox": d.bbox,
             "timestamp": d.timestamp.isoformat(),
+            "has_evidence_image": bool((d.metadata_json or {}).get("evidence_image")),
         }
         for d in events
     ]}
+
+
+@router.get("/events/{event_id}/evidence")
+def event_evidence(event_id: int, db: Session = Depends(get_db)):
+    """The real annotated detection frame — bounding box, class label and
+    confidence burned into the pixels by the edge worker with OpenCV
+    (draw_detection_boxes in analytics/worker.py) at the moment of detection."""
+    import base64
+
+    from fastapi.responses import Response
+
+    event = db.get(DetectionEvent, event_id)
+    if not event:
+        raise HTTPException(404, "Detection event not found")
+    b64 = (event.metadata_json or {}).get("evidence_image")
+    if not b64:
+        raise HTTPException(404, "No evidence frame recorded for this detection")
+    return Response(content=base64.b64decode(b64), media_type="image/jpeg")

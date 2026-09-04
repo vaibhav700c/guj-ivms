@@ -286,6 +286,33 @@ EVIDENCE_MAX_WIDTH = int(os.environ.get("EVIDENCE_MAX_WIDTH", "640"))
 EVIDENCE_JPEG_QUALITY = int(os.environ.get("EVIDENCE_JPEG_QUALITY", "80"))
 
 
+def draw_detection_boxes(frame: np.ndarray, boxes: list[dict]) -> np.ndarray:
+    """Draw real bounding boxes on a COPY of the frame using OpenCV — genuine
+    cv2.rectangle/putText annotation over the actual pixels the model ran
+    inference on, not a mockup or a CSS overlay. This is what the Detection
+    Viewer UI (frontend "Detections" page) displays: the same evidence image
+    everywhere else, with the model's own bbox/class/confidence burned in.
+
+    Each entry in `boxes`: {"bbox": (x1,y1,x2,y2), "label": str,
+    "confidence": float | None, "color": (b,g,r) in OpenCV order}.
+    """
+    annotated = frame.copy()
+    for box in boxes:
+        x1, y1, x2, y2 = [int(v) for v in box["bbox"]]
+        color = box.get("color", (0, 200, 0))
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        label = box.get("label", "")
+        conf = box.get("confidence")
+        text = f"{label} {conf * 100:.0f}%" if conf is not None else label
+        if not text:
+            continue
+        (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        ty = max(y1, th + 6)
+        cv2.rectangle(annotated, (x1, ty - th - 6), (x1 + tw + 6, ty + baseline - 2), color, -1)
+        cv2.putText(annotated, text, (x1 + 3, ty - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return annotated
+
+
 def encode_evidence_b64(frame: np.ndarray) -> str | None:
     """Base64-JPEG the match frame for inline transport in the ingest payload.
 
@@ -739,9 +766,17 @@ class CameraPipeline(threading.Thread):
         self._last_plate_push[norm] = now
         self.anpr_stats["pushed"] += 1
         snap = save_snapshot(self.camera_id, frame) if frame is not None else None
-        evidence = encode_evidence_b64(frame) if frame is not None else None
         match = self._vehicle_match_at(plate_box, detections)
         vehicle_type, vehicle_bbox = match if match else (None, None)
+        evidence = None
+        if frame is not None:
+            px, py, pw, ph = plate_box
+            boxes = [{"bbox": (px, py, px + pw, py + ph), "label": f"PLATE {voted_text}",
+                      "confidence": best_ocr_conf, "color": (0, 165, 255)}]
+            if vehicle_bbox is not None:
+                boxes.append({"bbox": vehicle_bbox, "label": vehicle_type or "vehicle",
+                              "confidence": best_det_conf, "color": (0, 200, 0)})
+            evidence = encode_evidence_b64(draw_detection_boxes(frame, boxes))
         appearance = (
             vehicle_appearance_signature(frame, vehicle_bbox)
             if frame is not None and vehicle_bbox is not None else None
@@ -797,6 +832,17 @@ class CameraPipeline(threading.Thread):
                 sig = vehicle_appearance_signature(frame, detections.xyxy[i])
                 if sig:
                     metadata["appearance_signature"] = sig
+            if frame is not None:
+                label = VEHICLE_TYPE_BY_CLASS.get(cls, "person" if cls in PERSON_CLASSES else "object")
+                det_conf = float(confidences[i]) if confidences is not None else None
+                annotated = draw_detection_boxes(frame, [{
+                    "bbox": detections.xyxy[i], "label": label,
+                    "confidence": det_conf,
+                    "color": (0, 200, 0) if cls in VEHICLE_CLASSES else (255, 140, 0),
+                }])
+                evidence = encode_evidence_b64(annotated)
+                if evidence:
+                    metadata["evidence_image"] = evidence
             self.ingest.detection(
                 camera_id=self.camera_id,
                 event_type="person" if cls in PERSON_CLASSES else "vehicle",
@@ -829,7 +875,11 @@ class CameraPipeline(threading.Thread):
                 entry_id, name, sim = match
                 self.faces_matched += 1
                 snap = save_snapshot(self.camera_id, frame)
-                evidence = encode_evidence_b64(frame)
+                annotated = draw_detection_boxes(frame, [{
+                    "bbox": (x1, y1, x2, y2), "label": name,
+                    "confidence": sim, "color": (0, 0, 220),
+                }])
+                evidence = encode_evidence_b64(annotated)
                 metadata.update({"face_name": name,
                                  "matched_watchlist_id": entry_id,
                                  "similarity": round(sim, 3)})
