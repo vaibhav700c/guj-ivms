@@ -291,9 +291,17 @@ export default function MapView() {
           </div>
 
           <MapContainer center={[22.6, 71.8]} zoom={7} className="h-[580px] w-full">
+            {/* CartoDB's dark_all basemap now requires an API key — anonymous
+                requests get a 200 OK "API KEY REQUIRED" watermark tile
+                instead of an error, so the map silently rendered nothing
+                useful. plan.md §9.2 specifies plain OpenStreetMap tiles
+                ("completely free, no API key needed"), which is also what
+                Vehicles.tsx's route-replay map already uses correctly; the
+                existing .leaflet-tile brightness/saturation filter (index.css)
+                keeps it consistent with the dark theme. */}
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-              url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
             {/* Coverage zones */}
             {coverage && cameras.map((c) => (
