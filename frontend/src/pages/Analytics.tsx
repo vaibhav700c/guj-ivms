@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Download, TrendingUp, Camera, Car, Users, Activity } from "lucide-react";
+import { Download, TrendingUp, Camera, Car, Users, Activity, AlertTriangle } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from "recharts";
-import { api, formatDateTime } from "../lib/api";
+import { api, describeApiError, formatDateTime } from "../lib/api";
+import InlineError from "../components/InlineError";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -25,6 +26,33 @@ function SectionTitle({ icon: Icon, children }: { icon: React.ElementType; child
   );
 }
 
+/** Shows an error / skeleton / honest-empty state in place of a chart, never a silently-empty chart. */
+function ChartSlot({
+  error, loading, empty, emptyIcon: EmptyIcon, emptyText, children,
+}: {
+  error?: string; loading: boolean; empty: boolean;
+  emptyIcon: React.ElementType; emptyText: string; children: React.ReactNode;
+}) {
+  if (error) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-2 text-red-400/80 px-4 text-center">
+        <AlertTriangle size={20} />
+        <span className="text-xs">Failed to load — {error}</span>
+      </div>
+    );
+  }
+  if (loading) return <div className="h-full skeleton rounded-xl" />;
+  if (empty) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-600">
+        <EmptyIcon size={20} />
+        <span className="text-xs">{emptyText}</span>
+      </div>
+    );
+  }
+  return <>{children}</>;
+}
+
 export default function Analytics() {
   const [byHour, setByHour] = useState<{ hour: string; count: number }[]>([]);
   const [byCamera, setByCamera] = useState<{ camera: string; city: string; events: number }[]>([]);
@@ -33,16 +61,37 @@ export default function Analytics() {
   const [overview, setOverview] = useState<Record<string, number>>({});
   const [timeline, setTimeline] = useState<{ bucket: string; count: number }[]>([]);
   const [faceEvents, setFaceEvents] = useState<FaceEvent[]>([]);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const setSectionError = (key: string, err: unknown | null) => {
+    setErrors((prev) => {
+      if (err == null) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: describeApiError(err) };
+    });
+  };
+
+  const load = () => {
+    const tasks = [
+      api<{ hour: string; count: number }[]>("/vehicles/traffic/by-hour").then((d) => { setByHour(d); setSectionError("byHour", null); }).catch((e) => setSectionError("byHour", e)),
+      api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=10").then((d) => { setByCamera(d); setSectionError("byCamera", null); }).catch((e) => setSectionError("byCamera", e)),
+      api<{ event_type: string; count: number }[]>("/analytics/detections/by-type").then((d) => { setByType(d); setSectionError("byType", null); }).catch((e) => setSectionError("byType", e)),
+      api<{ tier: string; count: number; description: string }[]>("/analytics/tiers/coverage").then((d) => { setTiers(d); setSectionError("tiers", null); }).catch((e) => setSectionError("tiers", e)),
+      api<Record<string, number>>("/analytics/overview").then((d) => { setOverview(d); setSectionError("overview", null); }).catch((e) => setSectionError("overview", e)),
+      api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=24").then((d) => { setTimeline(d); setSectionError("timeline", null); }).catch((e) => setSectionError("timeline", e)),
+      // Face detection events (detection events with face type)
+      api<{ items: FaceEvent[] }>("/alerts?limit=20&alert_type=wanted_person").then((r) => { setFaceEvents(r.items ?? []); setSectionError("faceEvents", null); }).catch((e) => setSectionError("faceEvents", e)),
+    ];
+    return Promise.all(tasks).then(() => undefined);
+  };
 
   useEffect(() => {
-    api<{ hour: string; count: number }[]>("/vehicles/traffic/by-hour").then(setByHour).catch(() => undefined);
-    api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=10").then(setByCamera).catch(() => undefined);
-    api<{ event_type: string; count: number }[]>("/analytics/detections/by-type").then(setByType).catch(() => undefined);
-    api<{ tier: string; count: number; description: string }[]>("/analytics/tiers/coverage").then(setTiers).catch(() => undefined);
-    api<Record<string, number>>("/analytics/overview").then(setOverview).catch(() => undefined);
-    api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=24").then(setTimeline).catch(() => undefined);
-    // Face detection events (detection events with face type)
-    api<{ items: FaceEvent[] }>("/alerts?limit=20&alert_type=wanted_person").then((r) => setFaceEvents(r.items ?? [])).catch(() => undefined);
+    load().finally(() => setInitialLoading(false));
   }, []);
 
   return (
@@ -72,6 +121,16 @@ export default function Analytics() {
         </div>
       </div>
 
+      {Object.keys(errors).length > 0 && (
+        <InlineError
+          message={`Some analytics data failed to load: ${Object.values(errors)[0]}${
+            Object.keys(errors).length > 1 ? ` (+${Object.keys(errors).length - 1} more section${Object.keys(errors).length > 2 ? "s" : ""})` : ""
+          }`}
+          onRetry={load}
+          onDismiss={() => setErrors({})}
+        />
+      )}
+
       {/* KPI strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
@@ -97,22 +156,25 @@ export default function Analytics() {
             <SectionTitle icon={TrendingUp}>ANPR Events — last 24 hours</SectionTitle>
           </div>
           <div className="h-56 p-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timeline}>
-                <defs>
-                  <linearGradient id="grad24h" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#f97316" stopOpacity={0.5} />
-                    <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
-                <XAxis dataKey="bucket" tick={{ fill: "#475569", fontSize: 10 }}
-                  tickFormatter={(v: string) => v.slice(11, 16)} />
-                <YAxis tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
-                <Tooltip contentStyle={TT} labelFormatter={(v: string) => v.replace("T", " ").slice(0, 16)} />
-                <Area type="monotone" dataKey="count" stroke="#f97316" fill="url(#grad24h)" strokeWidth={2} dot={false} />
-              </AreaChart>
-            </ResponsiveContainer>
+            <ChartSlot error={errors.timeline} loading={initialLoading} empty={timeline.length === 0}
+              emptyIcon={TrendingUp} emptyText="No ANPR events in this window yet">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={timeline}>
+                  <defs>
+                    <linearGradient id="grad24h" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#f97316" stopOpacity={0.5} />
+                      <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
+                  <XAxis dataKey="bucket" tick={{ fill: "#475569", fontSize: 10 }}
+                    tickFormatter={(v: string) => v.slice(11, 16)} />
+                  <YAxis tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
+                  <Tooltip contentStyle={TT} labelFormatter={(v: string) => v.replace("T", " ").slice(0, 16)} />
+                  <Area type="monotone" dataKey="count" stroke="#f97316" fill="url(#grad24h)" strokeWidth={2} dot={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </ChartSlot>
           </div>
         </div>
 
@@ -122,6 +184,8 @@ export default function Analytics() {
             <SectionTitle icon={TrendingUp}>Traffic Volume by Hour of Day</SectionTitle>
           </div>
           <div className="h-56 p-4">
+            <ChartSlot error={errors.byHour} loading={initialLoading} empty={byHour.length === 0}
+              emptyIcon={TrendingUp} emptyText="No hourly traffic data yet">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={byHour}>
                 <defs>
@@ -137,6 +201,7 @@ export default function Analytics() {
                 <Area type="monotone" dataKey="count" stroke="#06b6d4" fill="url(#gradH)" strokeWidth={2} dot={false} />
               </AreaChart>
             </ResponsiveContainer>
+            </ChartSlot>
           </div>
         </div>
 
@@ -146,17 +211,20 @@ export default function Analytics() {
             <SectionTitle icon={Camera}>Top Cameras by ANPR Volume</SectionTitle>
           </div>
           <div className="h-56 p-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={byCamera} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
-                <XAxis type="number" tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
-                <YAxis type="category" dataKey="camera" width={160}
-                  tick={{ fill: "#94a3b8", fontSize: 9 }}
-                  tickFormatter={(v: string) => v.length > 22 ? v.slice(0, 22) + "…" : v} />
-                <Tooltip contentStyle={TT} />
-                <Bar dataKey="events" fill="#f97316" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <ChartSlot error={errors.byCamera} loading={initialLoading} empty={byCamera.length === 0}
+              emptyIcon={Camera} emptyText="No camera traffic recorded yet">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={byCamera} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
+                  <XAxis type="number" tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
+                  <YAxis type="category" dataKey="camera" width={160}
+                    tick={{ fill: "#94a3b8", fontSize: 9 }}
+                    tickFormatter={(v: string) => v.length > 22 ? v.slice(0, 22) + "…" : v} />
+                  <Tooltip contentStyle={TT} />
+                  <Bar dataKey="events" fill="#f97316" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartSlot>
           </div>
         </div>
 
@@ -166,7 +234,8 @@ export default function Analytics() {
             <SectionTitle icon={Activity}>Detection Events by Class</SectionTitle>
           </div>
           <div className="h-56 p-4">
-            {byType.length > 0 ? (
+            <ChartSlot error={errors.byType} loading={initialLoading} empty={byType.length === 0}
+              emptyIcon={Activity} emptyText="No detection data yet — simulator will generate it once running">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie data={byType} dataKey="count" nameKey="event_type" innerRadius={50} outerRadius={80} paddingAngle={4}>
@@ -176,12 +245,7 @@ export default function Analytics() {
                   <Tooltip contentStyle={TT} />
                 </PieChart>
               </ResponsiveContainer>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-600">
-                <Activity size={24} />
-                <span className="text-xs">No detection data yet — simulator running…</span>
-              </div>
-            )}
+            </ChartSlot>
           </div>
         </div>
       </div>
@@ -191,6 +255,17 @@ export default function Analytics() {
         <div className="card-header">
           <SectionTitle icon={Camera}>Analytics Tiering Coverage (plan §4)</SectionTitle>
         </div>
+        {errors.tiers ? (
+          <div className="p-5">
+            <InlineError message={`Failed to load tier coverage — ${errors.tiers}`} onRetry={load} />
+          </div>
+        ) : initialLoading ? (
+          <div className="p-5 grid md:grid-cols-3 gap-4">
+            {[0, 1, 2].map((i) => <div key={i} className="skeleton h-24 rounded-xl" />)}
+          </div>
+        ) : tiers.length === 0 ? (
+          <div className="p-10 text-center text-slate-600 text-sm">No tier coverage data yet</div>
+        ) : (
         <div className="p-5 grid md:grid-cols-3 gap-4">
           {tiers.map((t) => {
             const max = Math.max(...tiers.map((x) => x.count), 1);
@@ -211,6 +286,7 @@ export default function Analytics() {
             );
           })}
         </div>
+        )}
       </div>
 
       {/* Face / Person match events */}
@@ -219,7 +295,15 @@ export default function Analytics() {
           <SectionTitle icon={Users}>Face & Person Match Events</SectionTitle>
           <span className="text-xs text-slate-500">{faceEvents.length} recent matches</span>
         </div>
-        {faceEvents.length > 0 ? (
+        {errors.faceEvents ? (
+          <div className="p-5">
+            <InlineError message={`Failed to load face/person match events — ${errors.faceEvents}`} onRetry={load} />
+          </div>
+        ) : initialLoading ? (
+          <div className="p-5 space-y-2">
+            {[0, 1, 2].map((i) => <div key={i} className="skeleton h-8 rounded-lg" />)}
+          </div>
+        ) : faceEvents.length > 0 ? (
           <table className="w-full">
             <thead>
               <tr className="border-b border-control-800">

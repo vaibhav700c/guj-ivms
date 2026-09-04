@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Search, Download, RefreshCw, Car, Filter } from "lucide-react";
-import { api, formatDateTime } from "../lib/api";
+import { api, describeApiError, formatDateTime } from "../lib/api";
+import InlineError from "../components/InlineError";
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
@@ -35,6 +36,8 @@ export default function AnprDetections() {
   const [cameraId, setCameraId] = useState("");
   const [hours, setHours] = useState("24");
   const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [liveMode, setLiveMode] = useState(true);
   const liveInterval = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -60,8 +63,14 @@ export default function AnprDetections() {
       } else {
         setItems(r.items);
       }
-    } catch { /* ignore */ } finally {
+      setError(null);
+    } catch (err) {
+      // Keep whatever was last successfully loaded on screen — don't blank the
+      // table on a transient failure, just surface the error alongside it.
+      setError(describeApiError(err));
+    } finally {
       setLoading(false);
+      setLoadedOnce(true);
     }
   };
 
@@ -110,6 +119,10 @@ export default function AnprDetections() {
           </a>
         </div>
       </div>
+
+      {error && (
+        <InlineError message={error} onRetry={() => load(true)} onDismiss={() => setError(null)} />
+      )}
 
       {/* Filters */}
       <div className="card p-4 flex flex-wrap gap-3 items-center">
@@ -214,10 +227,27 @@ export default function AnprDetections() {
                   </td>
                 </tr>
               ))}
-              {items.length === 0 && !loading && (
+              {items.length === 0 && loading && !loadedOnce && (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center">
+                    <div className="flex flex-col items-center gap-2">
+                      <RefreshCw size={18} className="animate-spin text-slate-600" />
+                      <span className="text-xs text-slate-600">Loading detections…</span>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              {items.length === 0 && loadedOnce && !loading && !error && (
                 <tr>
                   <td colSpan={7} className="py-16 text-center text-slate-600 text-sm">
                     No ANPR detections in the selected time range.
+                  </td>
+                </tr>
+              )}
+              {items.length === 0 && error && (
+                <tr>
+                  <td colSpan={7} className="py-16 text-center text-red-400/80 text-sm">
+                    Could not load ANPR detections — see error above.
                   </td>
                 </tr>
               )}

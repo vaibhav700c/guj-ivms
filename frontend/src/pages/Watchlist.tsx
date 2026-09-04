@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2, ListChecks, Upload, X, FileText } from "lucide-react";
-import { api } from "../lib/api";
+import { api, describeApiError } from "../lib/api";
+import InlineError from "../components/InlineError";
 
 interface Entry {
   id: number;
@@ -36,11 +37,16 @@ stolen_vehicle,vehicle,GJ 01 KL 3344,medium,Two-wheeler theft Vadodara,FIR/2024/
 
 export default function Watchlist() {
   const [items, setItems] = useState<Entry[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [bulkResult, setBulkResult] = useState<{ created: number; skipped: number } | null>(null);
   const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
   const [form, setForm] = useState({
     category: "stolen_vehicle",
     subject_type: "vehicle",
@@ -51,12 +57,17 @@ export default function Watchlist() {
   });
 
   const load = () => {
-    api<{ items: Entry[] }>("/watchlist").then((r) => setItems(r.items)).catch(() => undefined);
+    setLoading(true);
+    api<{ items: Entry[] }>("/watchlist")
+      .then((r) => { setItems(r.items); setError(null); })
+      .catch((err) => setError(describeApiError(err)))
+      .finally(() => { setLoading(false); setLoadedOnce(true); });
   };
   useEffect(load, []);
 
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
+    setActionError(null);
     try {
       await api("/watchlist", {
         method: "POST",
@@ -66,19 +77,29 @@ export default function Watchlist() {
       setForm({ ...form, identifier: "", description: "", fir_number: "" });
       load();
     } catch (err) {
-      alert(err);
+      setActionError(describeApiError(err));
     }
   };
 
   const remove = async (id: number) => {
     if (!confirm("Remove this watchlist entry?")) return;
-    await api(`/watchlist/${id}`, { method: "DELETE" });
-    load();
+    setActionError(null);
+    try {
+      await api(`/watchlist/${id}`, { method: "DELETE" });
+      load();
+    } catch (err) {
+      setActionError(describeApiError(err));
+    }
   };
 
   const toggle = async (entry: Entry) => {
-    await api(`/watchlist/${entry.id}`, { method: "PATCH", body: JSON.stringify({ active: !entry.active }) });
-    load();
+    setActionError(null);
+    try {
+      await api(`/watchlist/${entry.id}`, { method: "PATCH", body: JSON.stringify({ active: !entry.active }) });
+      load();
+    } catch (err) {
+      setActionError(describeApiError(err));
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -94,6 +115,7 @@ export default function Watchlist() {
     if (!bulkText.trim()) return;
     setBulkLoading(true);
     setBulkResult(null);
+    setBulkError(null);
     try {
       const isCSV = bulkText.trim().startsWith("category") || bulkText.includes(",");
       const result = await api<{ created: number; skipped: number }>("/watchlist/bulk-import", {
@@ -104,7 +126,7 @@ export default function Watchlist() {
       setBulkResult(result);
       load();
     } catch (err) {
-      alert(`Bulk import failed: ${err}`);
+      setBulkError(describeApiError(err));
     } finally {
       setBulkLoading(false);
     }
@@ -128,6 +150,13 @@ export default function Watchlist() {
           </button>
         </div>
       </div>
+
+      {error && (
+        <InlineError message={error} onRetry={load} onDismiss={() => setError(null)} />
+      )}
+      {actionError && (
+        <InlineError message={actionError} onDismiss={() => setActionError(null)} />
+      )}
 
       {/* Single add form */}
       {showForm && (
@@ -193,6 +222,9 @@ export default function Watchlist() {
               ✓ Created {bulkResult.created} entries · Skipped {bulkResult.skipped} (duplicates or invalid)
             </div>
           )}
+          {bulkError && (
+            <InlineError message={`Bulk import failed: ${bulkError}`} onDismiss={() => setBulkError(null)} />
+          )}
 
           <button className="btn-primary" disabled={bulkLoading || !bulkText.trim()} onClick={submitBulk}>
             {bulkLoading ? "Importing…" : "Import Now"}
@@ -238,7 +270,12 @@ export default function Watchlist() {
             </tbody>
           </table>
         </div>
-        {items.length === 0 && (
+        {items.length === 0 && loading && !loadedOnce && (
+          <div className="p-4 space-y-2">
+            {[0, 1, 2].map((i) => <div key={i} className="skeleton h-9 rounded-lg" />)}
+          </div>
+        )}
+        {items.length === 0 && loadedOnce && !error && (
           <div className="p-6 text-center text-sm text-slate-500 flex flex-col items-center gap-2">
             <ListChecks size={24} className="text-slate-600" />
             Watchlist is empty — add stolen vehicles or wanted persons to trigger live alerts.

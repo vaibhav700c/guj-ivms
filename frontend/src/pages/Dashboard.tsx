@@ -9,7 +9,8 @@ import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid,
 } from "recharts";
-import { api, formatDateTime } from "../lib/api";
+import { api, describeApiError, formatDateTime } from "../lib/api";
+import InlineError from "../components/InlineError";
 
 interface Overview {
   cameras_total: number; cameras_online: number; cameras_offline: number;
@@ -93,19 +94,37 @@ export default function Dashboard() {
   const [alertStats, setAlertStats] = useState<AlertStats | null>(null);
   const [tiers, setTiers] = useState<TierItem[]>([]);
   const [simLoading, setSimLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [simError, setSimError] = useState<string | null>(null);
+
+  const setSectionError = (key: string, err: unknown | null) => {
+    setErrors((prev) => {
+      if (err == null) {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: describeApiError(err) };
+    });
+  };
 
   const refresh = () => {
-    api<Overview>("/analytics/overview").then(setOv).catch(() => undefined);
-    api<{ items: AlertItem[] }>("/alerts?limit=8&status=new").then((r) => setAlerts(r.items)).catch(() => undefined);
-    api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=12").then(setTimeline).catch(() => undefined);
-    api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=6").then(setTraffic).catch(() => undefined);
-    api<SimStatus>("/simulator/status").then(setSimStatus).catch(() => undefined);
-    api<AlertStats>("/alerts/stats").then(setAlertStats).catch(() => undefined);
-    api<TierItem[]>("/analytics/tiers/coverage").then(setTiers).catch(() => undefined);
+    const tasks = [
+      api<Overview>("/analytics/overview").then((d) => { setOv(d); setSectionError("overview", null); }).catch((e) => setSectionError("overview", e)),
+      api<{ items: AlertItem[] }>("/alerts?limit=8&status=new").then((r) => { setAlerts(r.items); setSectionError("alerts", null); }).catch((e) => setSectionError("alerts", e)),
+      api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=12").then((d) => { setTimeline(d); setSectionError("timeline", null); }).catch((e) => setSectionError("timeline", e)),
+      api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=6").then((d) => { setTraffic(d); setSectionError("traffic", null); }).catch((e) => setSectionError("traffic", e)),
+      api<SimStatus>("/simulator/status").then((d) => { setSimStatus(d); setSectionError("sim", null); }).catch((e) => setSectionError("sim", e)),
+      api<AlertStats>("/alerts/stats").then((d) => { setAlertStats(d); setSectionError("alertStats", null); }).catch((e) => setSectionError("alertStats", e)),
+      api<TierItem[]>("/analytics/tiers/coverage").then((d) => { setTiers(d); setSectionError("tiers", null); }).catch((e) => setSectionError("tiers", e)),
+    ];
+    return Promise.all(tasks).then(() => undefined);
   };
 
   useEffect(() => {
-    refresh();
+    refresh().finally(() => setInitialLoading(false));
     const id = setInterval(refresh, 15_000);
     return () => clearInterval(id);
   }, []);
@@ -113,6 +132,7 @@ export default function Dashboard() {
   const toggleSim = async () => {
     if (!simStatus) return;
     setSimLoading(true);
+    setSimError(null);
     try {
       if (simStatus.running) {
         await api("/simulator/stop", { method: "POST" });
@@ -121,6 +141,8 @@ export default function Dashboard() {
       }
       const s = await api<SimStatus>("/simulator/status");
       setSimStatus(s);
+    } catch (err) {
+      setSimError(describeApiError(err));
     } finally {
       setSimLoading(false);
     }
@@ -157,6 +179,17 @@ export default function Dashboard() {
           </Link>
         </div>
       </div>
+
+      {/* ── Data-load error banner ─────────────────────────────────────── */}
+      {Object.keys(errors).length > 0 && (
+        <InlineError
+          message={`Some dashboard data failed to load: ${Object.values(errors)[0]}${
+            Object.keys(errors).length > 1 ? ` (+${Object.keys(errors).length - 1} more section${Object.keys(errors).length > 2 ? "s" : ""})` : ""
+          }`}
+          onRetry={refresh}
+          onDismiss={() => setErrors({})}
+        />
+      )}
 
       {/* ── Alert stats strip ─────────────────────────────────────── */}
       {alertStats && (
@@ -227,24 +260,38 @@ export default function Dashboard() {
             </Link>
           </div>
           <div className="h-52 p-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timeline}>
-                <defs>
-                  <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#f97316" stopOpacity={0.4} />
-                    <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
-                <XAxis dataKey="bucket" tick={{ fill: "#475569", fontSize: 10 }}
-                  tickFormatter={(v: string) => v.slice(11, 16)} />
-                <YAxis tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
-                <Tooltip contentStyle={TT_STYLE}
-                  labelFormatter={(v: string) => v.replace("T", " ").slice(0, 16)} />
-                <Area type="monotone" dataKey="count" stroke="#f97316" strokeWidth={2}
-                  fill="url(#areaGrad)" dot={false} activeDot={{ r: 4, fill: "#f97316" }} />
-              </AreaChart>
-            </ResponsiveContainer>
+            {errors.timeline ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-red-400/80">
+                <AlertTriangle size={20} />
+                <span className="text-xs text-center px-4">Failed to load timeline — {errors.timeline}</span>
+              </div>
+            ) : initialLoading ? (
+              <div className="h-full skeleton rounded-xl" />
+            ) : timeline.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-600">
+                <TrendingUp size={20} />
+                <span className="text-xs">No ANPR events in this window yet</span>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={timeline}>
+                  <defs>
+                    <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#f97316" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
+                  <XAxis dataKey="bucket" tick={{ fill: "#475569", fontSize: 10 }}
+                    tickFormatter={(v: string) => v.slice(11, 16)} />
+                  <YAxis tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
+                  <Tooltip contentStyle={TT_STYLE}
+                    labelFormatter={(v: string) => v.replace("T", " ").slice(0, 16)} />
+                  <Area type="monotone" dataKey="count" stroke="#f97316" strokeWidth={2}
+                    fill="url(#areaGrad)" dot={false} activeDot={{ r: 4, fill: "#f97316" }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -260,10 +307,21 @@ export default function Dashboard() {
             </Link>
           </div>
           <div className="flex-1 overflow-y-auto divide-y divide-control-800/50 max-h-52">
-            {alerts.length === 0 && (
+            {alerts.length === 0 && errors.alerts && (
+              <div className="p-4 text-xs text-red-400 text-center py-8 flex flex-col items-center gap-2">
+                <AlertTriangle size={18} />
+                Failed to load alerts — {errors.alerts}
+              </div>
+            )}
+            {alerts.length === 0 && !errors.alerts && !initialLoading && (
               <div className="p-4 text-xs text-slate-600 text-center py-8">
                 <CheckCircle size={20} className="mx-auto mb-2 text-emerald-600" />
                 No open alerts
+              </div>
+            )}
+            {alerts.length === 0 && !errors.alerts && initialLoading && (
+              <div className="p-4 space-y-2">
+                {[0, 1, 2].map((i) => <div key={i} className="skeleton h-8 rounded-lg" />)}
               </div>
             )}
             {alerts.map((a) => (
@@ -294,17 +352,31 @@ export default function Dashboard() {
             </Link>
           </div>
           <div className="h-52 p-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={traffic} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
-                <XAxis type="number" tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
-                <YAxis type="category" dataKey="camera" width={130}
-                  tick={{ fill: "#94a3b8", fontSize: 9 }}
-                  tickFormatter={(v: string) => v.length > 18 ? v.slice(0, 18) + "…" : v} />
-                <Tooltip contentStyle={TT_STYLE} />
-                <Bar dataKey="events" fill="#06b6d4" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {errors.traffic ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-red-400/80">
+                <AlertTriangle size={20} />
+                <span className="text-xs text-center px-4">Failed to load — {errors.traffic}</span>
+              </div>
+            ) : initialLoading ? (
+              <div className="h-full skeleton rounded-xl" />
+            ) : traffic.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-600">
+                <Database size={20} />
+                <span className="text-xs">No camera traffic recorded yet</span>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={traffic} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#112038" />
+                  <XAxis type="number" tick={{ fill: "#475569", fontSize: 10 }} allowDecimals={false} />
+                  <YAxis type="category" dataKey="camera" width={130}
+                    tick={{ fill: "#94a3b8", fontSize: 9 }}
+                    tickFormatter={(v: string) => v.length > 18 ? v.slice(0, 18) + "…" : v} />
+                  <Tooltip contentStyle={TT_STYLE} />
+                  <Bar dataKey="events" fill="#06b6d4" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -322,8 +394,10 @@ export default function Dashboard() {
           <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
               {
-                label: "API Backend", value: "Operational",
-                ok: true, sub: "Render · guj-ivms-api",
+                label: "API Backend",
+                value: Object.keys(errors).length === 0 ? "Operational" : "Degraded",
+                ok: Object.keys(errors).length === 0,
+                sub: Object.keys(errors).length === 0 ? "Render · guj-ivms-api" : `${Object.keys(errors).length} section(s) failing`,
               },
               {
                 label: "Sentinel Grid", value: "30 cameras",
@@ -365,7 +439,7 @@ export default function Dashboard() {
                 <div className="text-[10px] text-slate-600 mt-0.5">
                   {simStatus
                     ? `${simStatus.events_generated.toLocaleString("en-IN")} events generated · ${simStatus.alerts_generated} alerts fired`
-                    : "Loading…"}
+                    : errors.sim ? `Failed to load: ${errors.sim}` : "Loading…"}
                 </div>
               </div>
               <button
@@ -382,6 +456,9 @@ export default function Dashboard() {
                   : <><PlayCircle size={13} /> Start Simulator</>}
               </button>
             </div>
+            {simError && (
+              <InlineError message={`Simulator action failed: ${simError}`} onDismiss={() => setSimError(null)} />
+            )}
 
             {/* Tier breakdown — real DB data */}
             <div className="grid grid-cols-3 gap-2 text-center">

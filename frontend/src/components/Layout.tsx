@@ -2,11 +2,12 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Video, MonitorPlay, Map as MapIcon,
   Car, Siren, ListChecks, BarChart3, ShieldCheck, LogOut,
-  Bell, BellOff, Wifi, WifiOff, ChevronRight, ScanLine,
+  Bell, BellOff, WifiOff, ChevronRight, ScanLine, Loader2,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../store/auth";
-import { wsUrl } from "../lib/api";
+import { useBackendStatus } from "../lib/api";
+import { useAlertStream } from "../hooks/useAlertStream";
 
 const NAV = [
   { to: "/",          label: "Dashboard",      icon: LayoutDashboard },
@@ -20,62 +21,15 @@ const NAV = [
   { to: "/analytics", label: "Analytics",        icon: BarChart3 },
 ];
 
-interface Alert { severity: string; message: string; timestamp: string; }
-
-const ALERT_AUDIO_KEY = "ivms_sound_enabled";
-
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const [connected, setConnected] = useState(false);
-  const [unread, setUnread] = useState(0);
-  const [ticker, setTicker] = useState<Alert[]>([]);
-  const [soundOn, setSoundOn] = useState(() => localStorage.getItem(ALERT_AUDIO_KEY) !== "false");
   const [expanded, setExpanded] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
 
-  // Subtle beep for critical alerts
-  const playBeep = useCallback(() => {
-    if (!soundOn) return;
-    try {
-      const ctx = new AudioContext();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = "sine"; osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-      osc.start(); osc.stop(ctx.currentTime + 0.4);
-    } catch { /* no audio context */ }
-  }, [soundOn]);
-
-  const toggleSound = () => {
-    setSoundOn((v) => { localStorage.setItem(ALERT_AUDIO_KEY, String(!v)); return !v; });
-  };
-
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let retry: ReturnType<typeof setTimeout>;
-    const connect = () => {
-      ws = new WebSocket(wsUrl());
-      ws.onopen = () => setConnected(true);
-      ws.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === "alert") {
-            setUnread((u) => u + 1);
-            const a: Alert = { severity: data.severity ?? "medium", message: data.message ?? "Alert", timestamp: data.timestamp ?? new Date().toISOString() };
-            setTicker((t) => [a, ...t].slice(0, 20));
-            if (data.severity === "critical" || data.severity === "high") playBeep();
-          }
-        } catch { /* ignore */ }
-      };
-      ws.onclose = () => { setConnected(false); retry = setTimeout(connect, 3000); };
-    };
-    connect();
-    return () => { clearTimeout(retry); ws?.close(); };
-  }, [playBeep]);
+  // Layout owns the single shared /ws/alerts connection for the whole app session.
+  const { connected, unread, ticker, soundOn, clearUnread, toggleSound } = useAlertStream(true);
+  const backendWaking = useBackendStatus((s) => s.waking);
 
   // Close sidebar on outside click (mobile)
   useEffect(() => {
@@ -157,6 +111,14 @@ export default function Layout() {
         </div>
       </header>
 
+      {/* ── Backend status banner ─────────────────────────────────────── */}
+      {backendWaking && (
+        <div className="h-7 shrink-0 flex items-center justify-center gap-2 text-[11px] font-medium text-amber-300 bg-amber-500/10 border-b border-amber-500/20">
+          <Loader2 size={11} className="animate-spin" />
+          Backend is waking up — first request after idle can take ~20s on the free tier…
+        </div>
+      )}
+
       <div className="flex flex-1 min-h-0">
 
         {/* ── Sidebar ─────────────────────────────────────── */}
@@ -175,7 +137,7 @@ export default function Layout() {
               key={to}
               to={to}
               end={to === "/"}
-              onClick={() => setUnread(0)}
+              onClick={() => clearUnread()}
               className={({ isActive }) =>
                 `relative flex items-center gap-3 mx-1.5 px-2.5 py-2.5 rounded-xl text-sm transition-all duration-200 group overflow-hidden ${
                   isActive

@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { Siren, CheckCheck, CheckCircle, XCircle, BellOff, Filter, RefreshCw } from "lucide-react";
-import { api, wsUrl, formatDateTime } from "../lib/api";
+import { useEffect, useState } from "react";
+import { CheckCheck, CheckCircle, XCircle, BellOff, RefreshCw } from "lucide-react";
+import { api, describeApiError, formatDateTime } from "../lib/api";
+import { useAlertStream } from "../hooks/useAlertStream";
+import InlineError from "../components/InlineError";
 
 interface AlertItem {
   id: number; alert_type: string; severity: string;
@@ -38,10 +40,15 @@ export default function Alerts() {
   const [items, setItems] = useState<AlertItem[]>([]);
   const [tab, setTab] = useState("new");
   const [severityFilter, setSeverityFilter] = useState("");
-  const [live, setLive] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [actioning, setActioning] = useState<number | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Shared /ws/alerts connection — Layout owns the socket, this page just
+  // reads live state and reacts to new messages. No second socket is opened.
+  const { connected, lastEvent } = useAlertStream();
 
   const load = () => {
     setLoading(true);
@@ -49,41 +56,30 @@ export default function Alerts() {
     if (tab) qs.set("status", tab);
     if (severityFilter) qs.set("severity", severityFilter);
     api<{ items: AlertItem[] }>(`/alerts?${qs}`)
-      .then((r) => setItems(r.items))
-      .catch(() => undefined)
-      .finally(() => setLoading(false));
+      .then((r) => { setItems(r.items); setError(null); })
+      .catch((err) => setError(describeApiError(err)))
+      .finally(() => { setLoading(false); setLoadedOnce(true); });
   };
   useEffect(load, [tab, severityFilter]);
 
+  // React to new live alerts pushed over the shared WS connection.
   useEffect(() => {
-    const connect = () => {
-      const ws = new WebSocket(wsUrl());
-      wsRef.current = ws;
-      ws.onopen = () => setLive(true);
-      ws.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          if (data.type === "alert" && data.payload?.id) {
-            setItems((prev) => {
-              const a = data.payload as AlertItem;
-              if (tab === "" || a.status === tab) return [a, ...prev].slice(0, 200);
-              return prev;
-            });
-          }
-        } catch { /* ignore */ }
-      };
-      ws.onclose = () => { setLive(false); setTimeout(connect, 3000); };
-    };
-    connect();
-    return () => wsRef.current?.close();
-  }, [tab]);
+    if (!lastEvent?.payload?.id) return;
+    const a = lastEvent.payload as unknown as AlertItem;
+    if (tab === "" || a.status === tab) {
+      setItems((prev) => [a, ...prev].slice(0, 200));
+    }
+  }, [lastEvent, tab]);
 
   const setStatus = async (id: number, status: string) => {
     setActioning(id);
+    setActionError(null);
     try {
       await api(`/alerts/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
       setItems((prev) => prev.map((a) => (a.id === id ? { ...a, status } : a)));
       if (tab && tab !== status) setItems((prev) => prev.filter((a) => a.id !== id));
+    } catch (err) {
+      setActionError(describeApiError(err));
     } finally { setActioning(null); }
   };
 
@@ -99,8 +95,8 @@ export default function Alerts() {
         <div>
           <h1 className="page-title flex items-center gap-3">
             Live Alerts
-            <span className={`text-xs font-normal px-2 py-0.5 rounded-full border ${live ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : "border-red-500/30 text-red-400 bg-red-500/10"}`}>
-              {live ? "● LIVE" : "○ RECONNECTING"}
+            <span className={`text-xs font-normal px-2 py-0.5 rounded-full border ${connected ? "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" : "border-red-500/30 text-red-400 bg-red-500/10"}`}>
+              {connected ? "● LIVE" : "○ RECONNECTING"}
             </span>
           </h1>
           <p className="page-subtitle">Correlation engine watchlist hits · auto-pushed via WebSocket</p>
@@ -119,6 +115,13 @@ export default function Alerts() {
           </button>
         </div>
       </div>
+
+      {error && (
+        <InlineError message={error} onRetry={load} onDismiss={() => setError(null)} />
+      )}
+      {actionError && (
+        <InlineError message={actionError} onDismiss={() => setActionError(null)} />
+      )}
 
       {/* Severity summary strip */}
       {items.length > 0 && (
@@ -211,7 +214,7 @@ export default function Alerts() {
           </div>
         ))}
 
-        {items.filter((a) => !severityFilter || a.severity === severityFilter).length === 0 && (
+        {loadedOnce && !error && !loading && items.filter((a) => !severityFilter || a.severity === severityFilter).length === 0 && (
           <div className="card p-16 text-center flex flex-col items-center gap-3">
             <BellOff size={32} className="text-slate-700" />
             <div className="text-sm text-slate-500">
@@ -220,6 +223,12 @@ export default function Alerts() {
             <div className="text-xs text-slate-600">
               The simulator generates watchlist hits every few seconds
             </div>
+          </div>
+        )}
+
+        {loading && items.length === 0 && (
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => <div key={i} className="skeleton h-16 rounded-xl" />)}
           </div>
         )}
       </div>

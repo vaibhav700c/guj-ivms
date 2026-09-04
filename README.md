@@ -2,7 +2,9 @@
 
 > Gujarat Police hackathon build · **Hybrid architecture (Model 1 + 2 + 3 + selective 4)** · 100% open-source · zero vendor lock-in
 
-A working end-to-end implementation of the plan in [`../plan.md`](../plan.md):
+A working end-to-end implementation of the project's implementation plan (`plan.md`,
+kept out of version control because the companion integration notes carry live
+camera-grid credentials):
 
 ```
 Camera → Edge/Regional Analytics Node → Metadata + Alerts → Central Platform
@@ -15,7 +17,7 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 
 | Layer | Plan model | Where |
 |---|---|---|
-| Camera Registry + GIS (50 seeded Gujarat cameras with real coordinates) | Model 1 | `backend/app/routes/cameras.py`, frontend **Camera Registry** + **GIS Map** pages |
+| Camera Registry + GIS (30 live Sentinel Grid cameras with real coordinates) | Model 1 | `backend/app/routes/cameras.py`, frontend **Camera Registry** + **GIS Map** pages |
 | Unified viewing grid (2×2 / 3×3 / 4×4, OSD overlays, MediaMTX-ready) | Model 2 | frontend **Live View** page |
 | Federation ingest API for edge/regional nodes (adapter contract + API-key) | Model 3 | `POST /api/v1/ingest/anpr`, `POST /api/v1/ingest/detection` |
 | Central analytics: ANPR events, detections, tiering (A/B/C), VAHAN-like registry | Model 4 | `backend/app/routes/{analytics,vehicles}.py` |
@@ -80,9 +82,16 @@ docker compose up --build
 | WebSocket live alerts | wss://guj-ivms-api.onrender.com/ws/alerts |
 
 Deployed via Render (Docker backend + managed PostgreSQL, `render.yaml` Blueprint
-spec in repo) and Vercel (`frontend/vercel.json`, Vite). First boot auto-seeded
-50 cameras, watchlist, VAHAN records and users into Postgres, and the demo
-simulator is generating live events/alerts.
+spec in repo) and Vercel (`frontend/vercel.json`, Vite). First boot auto-seeds
+the 30 Sentinel Grid cameras, watchlist, VAHAN records and users, and the demo
+simulator generates live events/alerts.
+
+> **Deploying this yourself:** apply `render.yaml` as a Render **Blueprint** rather
+> than creating the service by hand — otherwise none of its environment variables
+> reach the container and the API silently falls back to an ephemeral SQLite file
+> that is wiped on every restart. `SENTINEL_EMAIL` **and** `SENTINEL_PASSWORD` are
+> both required; the grid's sign-in form rejects a password on its own, and every
+> live-video and snapshot endpoint returns 502/503 without them.
 
 ## API surface (v1)
 
