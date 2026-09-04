@@ -42,7 +42,7 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from urllib.parse import quote
 
 import cv2
@@ -70,7 +70,10 @@ SENTINEL_PASSWORD = os.environ.get("SENTINEL_PASSWORD", "")
 CAMERA_IDS = [int(c) for c in os.environ.get("CAMERA_IDS", "1,6,12").split(",") if c.strip()]
 SAMPLE_FPS = float(os.environ.get("SAMPLE_FPS", "2.0"))        # inference rate per camera
 FACE_EVERY_S = float(os.environ.get("FACE_EVERY_S", "15"))     # face pass cadence
-PLATE_MIN_CONF = float(os.environ.get("PLATE_MIN_CONF", "0.55"))
+PLATE_MIN_CONF = float(os.environ.get("PLATE_MIN_CONF", "0.5"))       # < this → discard (plan §5.2)
+PLATE_CONF_HIGH = float(os.environ.get("PLATE_CONF_HIGH", "0.7"))     # >= this → high-confidence
+PLATE_MIN_VOTES = int(os.environ.get("PLATE_MIN_VOTES", "2"))         # corroborating reads required
+PLATE_VOTE_WINDOW_S = float(os.environ.get("PLATE_VOTE_WINDOW_S", "5.0"))
 FACE_MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.45"))
 FACE_MIN_DETECT_CONF = float(os.environ.get("FACE_MIN_DETECT_CONF", "0.5"))
 PUSH_DETECTION_EVERY_S = float(os.environ.get("PUSH_DETECTION_EVERY_S", "10"))
@@ -84,6 +87,145 @@ VEHICLE_TYPE_BY_CLASS = {2: "car", 3: "bike", 5: "bus", 7: "truck"}
 
 def normalize_plate(text: str) -> str:
     return "".join(ch for ch in text.upper() if ch.isalnum())
+
+
+# ── Indian plate validation + positional OCR correction (plan §5.1-5.3) ──────
+#
+# Format: [State:2 letters][District:2 digits][Series:1-3 letters][Number:1-4
+# digits], e.g. GJ 01 AB 1234. The plan's own §5.3 stub admits it is
+# unimplemented ("Simplified — full implementation uses positional logic");
+# this replaces it. A digit sitting in a letter slot (or vice versa) is a
+# well-known OCR confusion pair and must be corrected *by position*, never by
+# a blind whole-string replace (a blind replace would mangle valid digits/
+# letters that happen to share a lookalike).
+
+PLATE_PATTERN = re.compile(r'^[A-Z]{2}\d{2}[A-Z]{1,3}\d{1,4}$')
+
+# Real Indian state/UT RTO codes. Vehicles from any state legitimately pass
+# through Gujarat cameras, so this is NOT restricted to GJ — but it does
+# reject two-letter prefixes that are not a real state code, which catches a
+# lot of OCR noise that would otherwise still "fit" the regex shape.
+VALID_STATE_CODES = {
+    "AN", "AP", "AR", "AS", "BR", "CH", "CG", "DD", "DL", "DN", "GA", "GJ",
+    "HR", "HP", "JK", "JH", "KA", "KL", "LA", "LD", "MP", "MH", "MN", "ML",
+    "MZ", "NL", "OD", "OR", "PY", "PB", "RJ", "SK", "TN", "TS", "TR", "UP",
+    "UK", "UA", "WB",
+}
+
+# OCR lookalike pairs (plan §5.3): a character read in the wrong "slot" type
+# gets mapped to its counterpart, never blindly across the whole string.
+LETTER_TO_DIGIT = {"O": "0", "I": "1", "L": "1", "S": "5", "Z": "2",
+                   "B": "8", "G": "6", "T": "7", "D": "0", "Q": "0"}
+DIGIT_TO_LETTER = {"0": "O", "1": "I", "5": "S", "2": "Z",
+                   "8": "B", "6": "G", "7": "T"}
+
+
+def _fix_char(ch: str, want_digit: bool) -> str | None:
+    """Coerce one OCR character into the type its plate slot expects."""
+    if want_digit:
+        return ch if ch.isdigit() else LETTER_TO_DIGIT.get(ch)
+    return ch if ch.isalpha() else DIGIT_TO_LETTER.get(ch)
+
+
+def _clean_plate_text(raw: str) -> str | None:
+    """Positional correction + Indian-format validation of a raw OCR string.
+
+    Tries every (series_len, number_len) split consistent with the plate
+    grammar and the string's length, correcting each character by the type
+    its position expects. Returns the corrected canonical plate (no spaces),
+    preferring the split that needs the fewest corrections (ties broken
+    toward the conventional 2-letter series), or None if the text cannot be
+    coerced into a valid, real-state-coded Indian plate at all.
+    """
+    text = "".join(ch for ch in raw.upper() if ch.isalnum())
+    if not (7 <= len(text) <= 11):
+        return None
+
+    best: tuple[tuple[int, int], str] | None = None
+    for series_len in (1, 2, 3):
+        for number_len in (1, 2, 3, 4):
+            if 4 + series_len + number_len != len(text):
+                continue
+            slots = ([False, False] + [True, True] +
+                     [False] * series_len + [True] * number_len)
+            out = []
+            cost = 0
+            for ch, want_digit in zip(text, slots):
+                fixed = _fix_char(ch, want_digit)
+                if fixed is None:
+                    break
+                cost += fixed != ch
+                out.append(fixed)
+            else:
+                corrected = "".join(out)
+                if corrected[:2] not in VALID_STATE_CODES:
+                    continue
+                rank = (cost, 0 if series_len == 2 else 1)
+                if best is None or rank < best[0]:
+                    best = (rank, corrected)
+
+    if best is None:
+        return None
+    corrected = best[1]
+    return corrected if PLATE_PATTERN.match(corrected) else None
+
+
+class _PlateVoter:
+    """Multi-read voting + dedup for one camera (plan §5.2 'Multi-Read Voting').
+
+    OCR reads of the *same* physical plate wobble slightly frame to frame.
+    Rather than pushing every frame's independent guess, reads are clustered
+    (exact length + small edit distance) within a short time window; a
+    cluster is only released once it has been corroborated by enough reads,
+    using the majority-voted spelling and the best confidence seen for it.
+    """
+
+    def __init__(self, window_s: float = PLATE_VOTE_WINDOW_S,
+                 min_votes: int = PLATE_MIN_VOTES) -> None:
+        self.window_s = window_s
+        self.min_votes = min_votes
+        self._clusters: list[dict] = []
+
+    @staticmethod
+    def _distance(a: str, b: str) -> int:
+        """Levenshtein distance — no extra dependency, strings are short."""
+        if a == b:
+            return 0
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            cur = [i] + [0] * len(b)
+            for j, cb in enumerate(b, 1):
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1,
+                             prev[j - 1] + (ca != cb))
+            prev = cur
+        return prev[-1]
+
+    def add(self, text: str, ocr_conf: float, det_conf: float,
+            now: float) -> tuple[str, float, float] | None:
+        """Register one validated read. Returns (voted_text, best_ocr_conf,
+        best_det_conf) once corroborated, else None (still buffering)."""
+        self._clusters = [c for c in self._clusters
+                          if now - c["last_ts"] <= self.window_s]
+        cluster = None
+        for c in self._clusters:
+            rep = c["variants"].most_common(1)[0][0]
+            max_dist = 1 if len(text) >= 7 else 0
+            if len(text) == len(rep) and self._distance(text, rep) <= max_dist:
+                cluster = c
+                break
+        if cluster is None:
+            cluster = {"variants": Counter(), "last_ts": now,
+                      "best_conf": 0.0, "best_det": det_conf}
+            self._clusters.append(cluster)
+        cluster["variants"][text] += 1
+        cluster["last_ts"] = now
+        if ocr_conf > cluster["best_conf"]:
+            cluster["best_conf"] = ocr_conf
+            cluster["best_det"] = det_conf
+        if sum(cluster["variants"].values()) >= self.min_votes:
+            voted_text = cluster["variants"].most_common(1)[0][0]
+            return voted_text, cluster["best_conf"], cluster["best_det"]
+        return None
 
 
 def rtsp_url(camera_id: int) -> str:
@@ -304,6 +446,8 @@ class CameraPipeline(threading.Thread):
         self._last_track_push: dict[str, float] = {}   # track key → ts
         self._last_face_pass = 0.0
         self._backoff = 2.0
+        self._plate_voter = _PlateVoter()
+        self.anpr_stats: dict[str, int] = defaultdict(int)
 
     # ── capture thread: always hold the newest frame (drops stale frames) ──
     def _capture_loop(self) -> None:
@@ -394,25 +538,39 @@ class CameraPipeline(threading.Thread):
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
                           conf: float, ocr_conf: float, plate_box,
                           detections) -> None:
-        norm = normalize_plate(plate_text)
+        """plate_text is already positionally-corrected + format-validated.
+
+        Buffers into the per-camera voter (plan §5.2 multi-read voting); only
+        pushes once a plate is corroborated, using the majority-voted
+        spelling and best confidence seen for it. The existing 10s per-plate
+        dedup still applies on top, so a parked vehicle doesn't spam events.
+        """
+        now = time.time()
+        voted = self._plate_voter.add(plate_text, ocr_conf, conf, now)
+        if voted is None:
+            return  # not yet corroborated — buffered
+        voted_text, best_ocr_conf, best_det_conf = voted
+
+        norm = normalize_plate(voted_text)
         if len(norm) < 5:
             return
-        now = time.time()
         if now - self._last_plate_push.get(norm, 0) < 10:   # dedupe 10s
             return
         self._last_plate_push[norm] = now
+        self.anpr_stats["pushed"] += 1
         result = self.ingest.anpr(
             camera_id=self.camera_id,
-            plate_text=plate_text,
-            confidence=conf,
-            ocr_confidence=ocr_conf,
+            plate_text=voted_text,
+            confidence=best_det_conf,
+            ocr_confidence=best_ocr_conf,
             vehicle_type=self._vehicle_type_at(plate_box, detections),
             ts_ms=frame_ts,
         )
+        tier = "HIGH" if best_ocr_conf >= PLATE_CONF_HIGH else "LOW-CONF"
         if result:
-            log.info("[%s] ANPR %s (ocr %.2f) → %s",
-                     external_id(self.camera_id), plate_text, ocr_conf,
-                     result.get("status"))
+            log.info("[%s] ANPR %s [%s] (ocr %.2f) → %s",
+                     external_id(self.camera_id), voted_text, tier,
+                     best_ocr_conf, result.get("status"))
 
     def _push_tracks(self, detections) -> None:
         """Push one metadata event per tracked vehicle/person, rate-limited.
@@ -537,16 +695,29 @@ class CameraPipeline(threading.Thread):
                     crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                     preds = self.models.plate_ocr.run(crop_gray, return_confidence=True)
                     for pred in preds:
-                        text = pred.plate
+                        raw_text = pred.plate
                         ocr_conf = (
                             float(np.mean(pred.char_probs))
                             if pred.char_probs is not None and pred.char_probs.size
                             else conf
                         )
-                        if ocr_conf < PLATE_MIN_CONF or len(text) < 5:
+                        self.anpr_stats["raw"] += 1
+                        # Confidence gate (plan §5.2): < 0.5 → discard outright.
+                        # 0.5-0.7 is still buffered as "low confidence" (the
+                        # real ocr_confidence value that goes out over the
+                        # wire is what distinguishes it — no separate flag).
+                        if ocr_conf < PLATE_MIN_CONF:
+                            self.anpr_stats["discarded_conf"] += 1
                             continue
+                        corrected = _clean_plate_text(raw_text)
+                        if corrected is None:
+                            self.anpr_stats["rejected_format"] += 1
+                            log.debug("[%s] ANPR reject (format) raw=%r ocr=%.2f",
+                                      external_id(self.camera_id), raw_text, ocr_conf)
+                            continue
+                        self.anpr_stats["validated"] += 1
                         self._maybe_push_plate(
-                            frame_ts, text, conf, ocr_conf,
+                            frame_ts, corrected, conf, ocr_conf,
                             (x1, y1, x2 - x1, y2 - y1),
                             detections if detections is not None else [])
             except Exception:
@@ -575,6 +746,9 @@ def cmd_run(args) -> None:
         while True:
             time.sleep(60)
             log.info("stats: %s", dict(ingest.stats))
+            for p in pipelines:
+                log.info("[%s] anpr funnel: %s",
+                         external_id(p.camera_id), dict(p.anpr_stats))
     except KeyboardInterrupt:
         log.info("shutting down…")
         for p in pipelines:
