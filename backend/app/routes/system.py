@@ -1,12 +1,12 @@
 """System routes — health, config, adapter status (plan §13 /system)."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import Camera, Department, User, VehicleRecord, WatchlistEntry
-from app.security import get_current_user
+from app.models import AuditLog, Camera, Department, User, VehicleRecord, WatchlistEntry
+from app.security import Permission, get_current_user, require_permission
 from app.simulator import simulator
 
 router = APIRouter(prefix="/system", tags=["system"])
@@ -67,6 +67,38 @@ def adapter_status(db: Session = Depends(get_db)):
         "ingest_endpoints": [
             "POST /api/v1/ingest/anpr",
             "POST /api/v1/ingest/detection",
+        ],
+    }
+
+
+@router.get("/audit")
+def audit_log(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: object = Depends(require_permission(Permission.SYSTEM_CONFIG)),
+):
+    """Recent audit trail entries (plan §17.1 Layer 4). `limit` is capped at 200."""
+    rows = (
+        db.query(AuditLog)
+        .order_by(AuditLog.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "total": db.query(AuditLog).count(),
+        "items": [
+            {
+                "id": r.id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "actor": r.actor,
+                "actor_role": r.actor_role,
+                "action": r.action,
+                "target_type": r.target_type,
+                "target_id": r.target_id,
+                "detail": r.detail,
+                "ip_address": r.ip_address,
+            }
+            for r in rows
         ],
     }
 

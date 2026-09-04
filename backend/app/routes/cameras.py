@@ -1,14 +1,15 @@
 """Camera registry routes — Model 1 foundation (CRUD + GIS + health)."""
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.audit import write_audit
 from app.db import get_db
-from app.models import ANPREvent, Camera, Department
-from app.security import get_current_user
+from app.models import ANPREvent, Camera, Department, User
+from app.security import Permission, get_current_user, require_permission
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
 
@@ -194,8 +195,8 @@ def gap_analysis(db: Session = Depends(get_db)):
 
 
 @router.post("/bulk", status_code=201)
-def bulk_import_cameras(payload: list[CameraCreate], db: Session = Depends(get_db),
-                        _: object = Depends(get_current_user)):
+def bulk_import_cameras(payload: list[CameraCreate], request: Request, db: Session = Depends(get_db),
+                        user: User | None = Depends(require_permission(Permission.CAMERA_MANAGE))):
     """Bulk import cameras (plan §13 cameras/bulk — CSV/JSON)."""
     created = []
     for item in payload:
@@ -203,6 +204,8 @@ def bulk_import_cameras(payload: list[CameraCreate], db: Session = Depends(get_d
         db.add(cam)
         created.append(cam)
     db.commit()
+    write_audit(db, actor=user, action="camera.bulk_import", target_type="camera",
+                detail={"imported": len(created)}, request=request)
     return {"imported": len(created), "items": [serialize(c) for c in created]}
 
 
@@ -235,8 +238,8 @@ def get_camera(camera_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", status_code=201)
-def create_camera(payload: CameraCreate, db: Session = Depends(get_db),
-                  _: object = Depends(get_current_user)):
+def create_camera(payload: CameraCreate, request: Request, db: Session = Depends(get_db),
+                  user: User | None = Depends(require_permission(Permission.CAMERA_MANAGE))):
     camera = Camera(
         **payload.model_dump(),
         status="unknown",
@@ -246,31 +249,39 @@ def create_camera(payload: CameraCreate, db: Session = Depends(get_db),
     db.add(camera)
     db.commit()
     db.refresh(camera)
+    write_audit(db, actor=user, action="camera.create", target_type="camera",
+                target_id=camera.id, detail={"name": camera.name}, request=request)
     return serialize(camera)
 
 
 @router.api_route("/{camera_id}", methods=["PATCH", "PUT"])
-def update_camera(camera_id: int, payload: CameraUpdate, db: Session = Depends(get_db),
-                  _: object = Depends(get_current_user)):
+def update_camera(camera_id: int, payload: CameraUpdate, request: Request, db: Session = Depends(get_db),
+                  user: User | None = Depends(require_permission(Permission.CAMERA_MANAGE))):
     """Update camera metadata (plan §13 PATCH/PUT /cameras/{id})."""
     camera = db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(404, "Camera not found")
-    for k, v in payload.model_dump(exclude_none=True).items():
+    changes = payload.model_dump(exclude_none=True)
+    for k, v in changes.items():
         setattr(camera, k, v)
     db.commit()
     db.refresh(camera)
+    write_audit(db, actor=user, action="camera.update", target_type="camera",
+                target_id=camera.id, detail={"fields": list(changes.keys())}, request=request)
     return serialize(camera)
 
 
 @router.delete("/{camera_id}", status_code=204)
-def delete_camera(camera_id: int, db: Session = Depends(get_db),
-                  _: object = Depends(get_current_user)):
+def delete_camera(camera_id: int, request: Request, db: Session = Depends(get_db),
+                  user: User | None = Depends(require_permission(Permission.CAMERA_MANAGE))):
     camera = db.get(Camera, camera_id)
     if not camera:
         raise HTTPException(404, "Camera not found")
+    name = camera.name
     db.delete(camera)
     db.commit()
+    write_audit(db, actor=user, action="camera.delete", target_type="camera",
+                target_id=camera_id, detail={"name": name}, request=request)
 
 
 @router.get("/departments/list")

@@ -1,14 +1,15 @@
 """Alert routes — list, filter, acknowledge/resolve workflow."""
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.audit import write_audit
 from app.db import get_db
-from app.models import Alert, Camera
-from app.security import get_current_user
+from app.models import Alert, Camera, User
+from app.security import Permission, get_current_user, require_permission
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -83,53 +84,63 @@ def alert_stats(db: Session = Depends(get_db)):
 
 
 @router.put("/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: int, db: Session = Depends(get_db),
-                      _: object = Depends(get_current_user)):
+def acknowledge_alert(alert_id: int, request: Request, db: Session = Depends(get_db),
+                      user: User | None = Depends(require_permission(Permission.ALERT_MANAGE))):
     """Acknowledge an alert (plan §13 PUT /alerts/{id}/acknowledge)."""
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
+    actor_name = user.username if user is not None else "control-room"
     alert.status = "acknowledged"
     alert.acknowledged_at = datetime.now(timezone.utc)
-    alert.acknowledged_by = alert.acknowledged_by or "control-room"
+    alert.acknowledged_by = alert.acknowledged_by or actor_name
     db.commit()
     db.refresh(alert)
+    write_audit(db, actor=user, action="alert.acknowledge", target_type="alert",
+                target_id=alert.id, detail={"status": alert.status}, request=request)
     return serialize(alert)
 
 
 @router.put("/{alert_id}/resolve")
-def resolve_alert(alert_id: int, db: Session = Depends(get_db),
-                  _: object = Depends(get_current_user)):
+def resolve_alert(alert_id: int, request: Request, db: Session = Depends(get_db),
+                  user: User | None = Depends(require_permission(Permission.ALERT_MANAGE))):
     """Resolve an alert (plan §13 PUT /alerts/{id}/resolve)."""
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
+    actor_name = user.username if user is not None else "control-room"
     now = datetime.now(timezone.utc)
     if alert.status == "new":
         alert.acknowledged_at = now
-        alert.acknowledged_by = alert.acknowledged_by or "control-room"
+        alert.acknowledged_by = alert.acknowledged_by or actor_name
     alert.status = "resolved"
     alert.resolved_at = now
     db.commit()
     db.refresh(alert)
+    write_audit(db, actor=user, action="alert.resolve", target_type="alert",
+                target_id=alert.id, detail={"status": alert.status}, request=request)
     return serialize(alert)
 
 
 @router.patch("/{alert_id}/status")
-def update_status(alert_id: int, payload: AlertStatusUpdate, db: Session = Depends(get_db),
-                  _: object = Depends(get_current_user)):
+def update_status(alert_id: int, payload: AlertStatusUpdate, request: Request,
+                  db: Session = Depends(get_db),
+                  user: User | None = Depends(require_permission(Permission.ALERT_MANAGE))):
     alert = db.get(Alert, alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
     if payload.status not in {"new", "acknowledged", "resolved", "false_positive"}:
         raise HTTPException(422, "Invalid status")
+    actor_name = user.username if user is not None else "control-room"
     alert.status = payload.status
     now = datetime.now(timezone.utc)
     if payload.status == "acknowledged":
         alert.acknowledged_at = now
-        alert.acknowledged_by = payload.acknowledged_by or "control-room"
+        alert.acknowledged_by = payload.acknowledged_by or actor_name
     if payload.status in {"resolved", "false_positive"}:
         alert.resolved_at = now
     db.commit()
     db.refresh(alert)
+    write_audit(db, actor=user, action="alert.status", target_type="alert",
+                target_id=alert.id, detail={"status": alert.status}, request=request)
     return serialize(alert)

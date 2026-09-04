@@ -1,11 +1,12 @@
 """Department management (plan §13 /departments)."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.audit import write_audit
 from app.db import get_db
-from app.models import Camera, Department
-from app.security import get_current_user
+from app.models import Camera, Department, User
+from app.security import Permission, require_permission
 
 router = APIRouter(prefix="/departments", tags=["departments"])
 
@@ -31,12 +32,14 @@ def list_departments(db: Session = Depends(get_db)):
 
 
 @router.post("", status_code=201)
-def create_department(payload: DepartmentCreate, db: Session = Depends(get_db),
-                      _: object = Depends(get_current_user)):
+def create_department(payload: DepartmentCreate, request: Request, db: Session = Depends(get_db),
+                      user: User | None = Depends(require_permission(Permission.SYSTEM_CONFIG))):
     dept = Department(**payload.model_dump())
     db.add(dept)
     db.commit()
     db.refresh(dept)
+    write_audit(db, actor=user, action="department.create", target_type="department",
+                target_id=dept.id, detail={"name": dept.name, "code": dept.code}, request=request)
     return {"id": dept.id, "name": dept.name, "code": dept.code}
 
 

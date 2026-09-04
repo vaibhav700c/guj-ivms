@@ -298,6 +298,90 @@ def test_login_flow(client, monkeypatch):
     assert bad.status_code == 401
 
 
+# ── RBAC + audit trail (plan §17.2 / §17.1 Layer 4) ──────────────────────────
+
+def test_rbac_denies_unprivileged_role_and_allows_admin_with_audit_trail(client, monkeypatch):
+    """When REQUIRE_AUTH is on: analyst (no CAMERA_MANAGE) is forbidden from
+    deleting a camera, admin succeeds, and the deletion is attributed + logged
+    to the audit trail retrievable via GET /system/audit."""
+    from app.config import settings
+
+    admin_token = client.post(
+        "/api/v1/auth/login", data={"username": "admin", "password": "admin123"}
+    ).json()["access_token"]
+    analyst_token = client.post(
+        "/api/v1/auth/login", data={"username": "analyst1", "password": "analyst123"}
+    ).json()["access_token"]
+
+    # Create the target camera while auth enforcement is still off.
+    r = client.post("/api/v1/cameras", json={
+        "name": "RBAC Test Camera", "latitude": 23.0, "longitude": 72.5,
+        "city": "Ahmedabad", "district": "Ahmedabad",
+    })
+    assert r.status_code == 201
+    cam_id = r.json()["id"]
+
+    monkeypatch.setattr(settings, "REQUIRE_AUTH", True)
+
+    # (a) analyst lacks CAMERA_MANAGE -> 403, camera untouched
+    r = client.delete(f"/api/v1/cameras/{cam_id}",
+                      headers={"Authorization": f"Bearer {analyst_token}"})
+    assert r.status_code == 403
+    assert client.get(f"/api/v1/cameras/{cam_id}",
+                      headers={"Authorization": f"Bearer {admin_token}"}).status_code == 200
+
+    # (b) admin has CAMERA_MANAGE -> succeeds
+    r = client.delete(f"/api/v1/cameras/{cam_id}",
+                      headers={"Authorization": f"Bearer {admin_token}"})
+    assert r.status_code in (200, 204)
+
+    # (c) audit entry recorded with real attribution, retrievable via the API
+    r = client.get("/api/v1/system/audit?limit=20",
+                   headers={"Authorization": f"Bearer {admin_token}"})
+    assert r.status_code == 200
+    hit = next(
+        (e for e in r.json()["items"]
+         if e["action"] == "camera.delete" and e["target_id"] == str(cam_id)),
+        None,
+    )
+    assert hit is not None
+    assert hit["actor"] == "admin"
+
+    # audit endpoint is itself gated (SYSTEM_CONFIG, admin-only)
+    assert client.get(
+        "/api/v1/system/audit", headers={"Authorization": f"Bearer {analyst_token}"}
+    ).status_code == 403
+    # and rejects an out-of-range limit rather than allowing unbounded reads
+    assert client.get(
+        "/api/v1/system/audit?limit=99999",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    ).status_code == 422
+
+
+def test_demo_mode_still_allows_mutation_without_token(client):
+    """REQUIRE_AUTH is False by default on this fixture — permission checks
+    and attribution must be a complete no-op, matching pre-RBAC behavior."""
+    from app.config import settings
+    assert settings.REQUIRE_AUTH is False
+
+    r = client.post("/api/v1/cameras", json={
+        "name": "Demo Mode Camera", "latitude": 23.1, "longitude": 72.6,
+        "city": "Ahmedabad", "district": "Ahmedabad",
+    })
+    assert r.status_code == 201
+    cam_id = r.json()["id"]
+    assert client.delete(f"/api/v1/cameras/{cam_id}").status_code in (200, 204)
+
+    # watchlist mutation attribution falls back to "control-room" in demo mode
+    r = client.post("/api/v1/watchlist", json={
+        "category": "stolen_vehicle", "subject_type": "vehicle",
+        "identifier": "GJ 11 DM 0001", "severity": "high",
+    })
+    assert r.status_code == 201
+    entry_id = r.json()["id"]
+    client.delete(f"/api/v1/watchlist/{entry_id}")
+
+
 # ── System (plan §11.2 / §13) ────────────────────────────────────────────────
 
 def test_system_adapters_and_health(client):

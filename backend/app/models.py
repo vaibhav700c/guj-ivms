@@ -198,6 +198,22 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AuditLog(Base):
+    """Audit & compliance trail (plan §17.1 Layer 4) — who did what, to what, when."""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(100), default="anonymous")
+    actor_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
 class CameraHealthLog(Base):
     """Time-series camera health samples (plan §9.1 camera_health_log)."""
 

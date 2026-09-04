@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.audit import write_audit
 from app.db import get_db
-from app.models import WatchlistEntry
-from app.security import get_current_user
+from app.models import User, WatchlistEntry
+from app.security import Permission, get_current_user, require_permission
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
@@ -76,22 +77,27 @@ def list_entries(
 
 
 @router.post("", status_code=201)
-def create_entry(payload: WatchlistCreate, db: Session = Depends(get_db),
-                 _: object = Depends(get_current_user)):
-    entry = WatchlistEntry(**payload.model_dump(), created_by="control-room")
+def create_entry(payload: WatchlistCreate, request: Request, db: Session = Depends(get_db),
+                 user: User | None = Depends(require_permission(Permission.WATCHLIST_MANAGE))):
+    actor_name = user.username if user is not None else "control-room"
+    entry = WatchlistEntry(**payload.model_dump(), created_by=actor_name)
     db.add(entry)
     db.commit()
     db.refresh(entry)
+    write_audit(db, actor=user, action="watchlist.create", target_type="watchlist",
+                target_id=entry.id, detail={"identifier": entry.identifier, "category": entry.category},
+                request=request)
     return serialize(entry)
 
 
 @router.post("/bulk-import", status_code=201)
 async def bulk_import(request: Request, db: Session = Depends(get_db),
-                      _: object = Depends(get_current_user)):
+                      user: User | None = Depends(require_permission(Permission.WATCHLIST_MANAGE))):
     """Bulk import watchlist entries — JSON array/{"items": [...]} or CSV (plan §13).
 
     CSV columns: category,subject_type,identifier,severity,description,fir_number,police_station
     """
+    actor_name = user.username if user is not None else "bulk-import"
     content_type = request.headers.get("content-type", "")
     items: list[dict] = []
 
@@ -157,11 +163,14 @@ async def bulk_import(request: Request, db: Session = Depends(get_db),
             fir_number=raw_item.get("fir_number") or None,
             police_station=raw_item.get("police_station") or None,
             active=bool(raw_item.get("active", True)),
-            created_by="bulk-import",
+            created_by=actor_name,
         ))
         created.append(identifier)
 
     db.commit()
+    write_audit(db, actor=user, action="watchlist.bulk_import", target_type="watchlist",
+                detail={"created": len(created), "skipped": len(skipped)}, request=request,
+                fallback_actor="bulk-import")
     return {
         "received": len(items),
         "created": len(created),
@@ -172,8 +181,8 @@ async def bulk_import(request: Request, db: Session = Depends(get_db),
 
 
 @router.post("/{entry_id}/enroll-face")
-def enroll_face(entry_id: int, payload: EnrollFace, db: Session = Depends(get_db),
-                _: object = Depends(get_current_user)):
+def enroll_face(entry_id: int, payload: EnrollFace, request: Request, db: Session = Depends(get_db),
+                user: User | None = Depends(require_permission(Permission.WATCHLIST_MANAGE))):
     """Store a reference ArcFace embedding on a watchlist person (plan §6).
 
     The edge analytics worker computes the embedding from a reference photo
@@ -191,6 +200,8 @@ def enroll_face(entry_id: int, payload: EnrollFace, db: Session = Depends(get_db
     entry.reference_embedding = payload.embedding
     db.commit()
     db.refresh(entry)
+    write_audit(db, actor=user, action="watchlist.enroll_face", target_type="watchlist",
+                target_id=entry.id, detail={"embedding_dim": len(payload.embedding)}, request=request)
     return {
         "id": entry.id,
         "identifier": entry.identifier,
@@ -200,21 +211,24 @@ def enroll_face(entry_id: int, payload: EnrollFace, db: Session = Depends(get_db
 
 
 @router.patch("/{entry_id}")
-def update_entry(entry_id: int, payload: WatchlistUpdate, db: Session = Depends(get_db),
-                 _: object = Depends(get_current_user)):
+def update_entry(entry_id: int, payload: WatchlistUpdate, request: Request, db: Session = Depends(get_db),
+                 user: User | None = Depends(require_permission(Permission.WATCHLIST_MANAGE))):
     entry = db.get(WatchlistEntry, entry_id)
     if not entry:
         raise HTTPException(404, "Watchlist entry not found")
-    for k, v in payload.model_dump(exclude_none=True).items():
+    changes = payload.model_dump(exclude_none=True)
+    for k, v in changes.items():
         setattr(entry, k, v)
     db.commit()
     db.refresh(entry)
+    write_audit(db, actor=user, action="watchlist.update", target_type="watchlist",
+                target_id=entry.id, detail={"fields": list(changes.keys())}, request=request)
     return serialize(entry)
 
 
 @router.delete("/{entry_id}", status_code=204)
-def delete_entry(entry_id: int, db: Session = Depends(get_db),
-                 _: object = Depends(get_current_user)):
+def delete_entry(entry_id: int, request: Request, db: Session = Depends(get_db),
+                 user: User | None = Depends(require_permission(Permission.WATCHLIST_MANAGE))):
     entry = db.get(WatchlistEntry, entry_id)
     if not entry:
         raise HTTPException(404, "Watchlist entry not found")
@@ -222,5 +236,8 @@ def delete_entry(entry_id: int, db: Session = Depends(get_db),
     from app.models import Alert
     db.query(Alert).filter(Alert.watchlist_id == entry_id).update(
         {Alert.watchlist_id: None})
+    identifier = entry.identifier
     db.delete(entry)
     db.commit()
+    write_audit(db, actor=user, action="watchlist.delete", target_type="watchlist",
+                target_id=entry_id, detail={"identifier": identifier}, request=request)
