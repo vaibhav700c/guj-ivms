@@ -87,6 +87,37 @@ async def _get_sentinel_cookie() -> str:
     return _cached_cookie
 
 
+async def _upstream_get(url: str, timeout: float = 20.0) -> httpx.Response:
+    """Fetch a Sentinel CDN URL with the session cookie, re-authenticating once.
+
+    Cloudflare fronts this CDN and answers 403 when it dislikes the caller, and
+    the session can lapse independently, so a single retry after a forced
+    re-auth covers both. Transport errors are mapped to 502 — previously they
+    escaped as opaque 500s.
+    """
+    global _cached_cookie
+
+    async def _attempt(cookie: str) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            return await client.get(
+                url,
+                cookies={SENTINEL_COOKIE_NAME: cookie},
+                headers={"User-Agent": SPOOFED_USER_AGENT},
+            )
+
+    try:
+        resp = await _attempt(await _get_sentinel_cookie())
+        if resp.status_code in (302, 401, 403):
+            _cached_cookie = None  # force a fresh session, then retry once
+            resp = await _attempt(await _get_sentinel_cookie())
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Upstream request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
+    return resp
+
+
 def _build_stream_info(cam_id: str) -> dict:
     cam_id = cam_id.lower()
     return {
@@ -114,29 +145,8 @@ async def refresh_auth():
 @router.get("/hls/{cam_id}/index.m3u8")
 async def hls_playlist(cam_id: str, request: Request):
     cam_id = cam_id.lower()
-    cookie = await _get_sentinel_cookie()
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
-
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": SPOOFED_USER_AGENT},
-        )
-
-    if resp.status_code == 401 or resp.status_code == 302:
-        global _cached_cookie
-        _cached_cookie = None
-        cookie = await _get_sentinel_cookie()
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(
-                upstream_url,
-                cookies={SENTINEL_COOKIE_NAME: cookie},
-                headers={"User-Agent": SPOOFED_USER_AGENT},
-            )
-
-    if resp.status_code != 200:
-        raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
+    resp = await _upstream_get(upstream_url, timeout=20)
 
     content = resp.text
 
@@ -168,23 +178,46 @@ async def hls_playlist(cam_id: str, request: Request):
     )
 
 
+_enc_key_cache: tuple[float, bytes] | None = None
+_ENC_KEY_TTL = 3600.0
+
+
 @router.get("/hls/{cam_id}/enc.key")
 async def hls_enc_key(cam_id: str):
-    cookie = await _get_sentinel_cookie()
-    upstream_url = f"{settings.SENTINEL_HLS_BASE}/enc.key"
+    """Serve the AES-128 key for the encrypted HLS segments.
 
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": SPOOFED_USER_AGENT},
-        )
+    Every player needs this key before it can decode a single segment, so it is
+    cached: the key is 16 bytes and effectively static, and re-fetching it for
+    each of ~16 grid tiles is what pushes Cloudflare into rate-limiting the
+    egress IP.
+    """
+    global _enc_key_cache
+
+    if _enc_key_cache and (time.time() - _enc_key_cache[0]) < _ENC_KEY_TTL:
+        return _key_response(_enc_key_cache[1])
+
+    cookie = await _get_sentinel_cookie()
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(
+                f"{settings.SENTINEL_HLS_BASE}/enc.key",
+                cookies={SENTINEL_COOKIE_NAME: cookie},
+                headers={"User-Agent": SPOOFED_USER_AGENT},
+            )
+    except httpx.HTTPError as exc:
+        # Transport-level failures were surfacing as opaque 500s.
+        raise HTTPException(502, f"Encryption key fetch failed: {exc}") from exc
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, "Encryption key not found")
 
+    _enc_key_cache = (time.time(), resp.content)
+    return _key_response(resp.content)
+
+
+def _key_response(content: bytes) -> Response:
     return Response(
-        content=resp.content,
+        content=content,
         media_type="application/octet-stream",
         headers={
             "Access-Control-Allow-Origin": "*",
@@ -199,18 +232,9 @@ async def hls_segment(cam_id: str, segment: str):
     if not segment.endswith(".ts") and not segment.endswith(".aac"):
         raise HTTPException(400, "Invalid segment type")
 
-    cookie = await _get_sentinel_cookie()
-    upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
-
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(
-            upstream_url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": SPOOFED_USER_AGENT},
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(resp.status_code, f"Segment not found: {segment}")
+    resp = await _upstream_get(
+        f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}", timeout=30
+    )
 
     return Response(
         content=resp.content,

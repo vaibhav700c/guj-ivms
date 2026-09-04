@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.models import Camera
-from app.routes.sentinel import SENTINEL_COOKIE_NAME, _get_sentinel_cookie
+from app.routes.sentinel import (
+    SENTINEL_COOKIE_NAME,
+    SPOOFED_USER_AGENT,
+    _get_sentinel_cookie,
+)
 
 router = APIRouter(prefix="/feeds", tags=["feeds"])
 
@@ -97,7 +101,10 @@ async def _capture_frame(cam_id: str) -> bytes:
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-headers", f"Cookie: {SENTINEL_COOKIE_NAME}={cookie}\r\n",
-        "-user_agent", "GujIVMS/1.0 snapshot",
+        # Cloudflare fronts the CDN and 403s non-browser agents, so ffmpeg has
+        # to present the same UA the HLS proxy uses — a custom one gets denied
+        # even with a valid session cookie.
+        "-user_agent", SPOOFED_USER_AGENT,
         "-rw_timeout", "15000000",  # 15s IO timeout (microseconds)
         "-i", url,
         "-frames:v", "1", "-q:v", "3", "-f", "image2", "pipe:1",
