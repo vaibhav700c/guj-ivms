@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import OrderedDict
 from typing import Optional
 
 import httpx
@@ -145,6 +146,11 @@ async def refresh_auth():
 @router.get("/hls/{cam_id}/index.m3u8")
 async def hls_playlist(cam_id: str, request: Request):
     cam_id = cam_id.lower()
+
+    cached = _playlist_cache.get(cam_id)
+    if cached and (time.time() - cached[0]) < _PLAYLIST_TTL:
+        return _playlist_response(cached[1])
+
     upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
     resp = await _upstream_get(upstream_url, timeout=20)
 
@@ -167,9 +173,13 @@ async def hls_playlist(cam_id: str, request: Request):
         return line
 
     rewritten = "\n".join(rewrite_line(l) for l in content.splitlines())
+    _playlist_cache[cam_id] = (time.time(), rewritten)
+    return _playlist_response(rewritten)
 
+
+def _playlist_response(body: str) -> Response:
     return Response(
-        content=rewritten,
+        content=body,
         media_type="application/vnd.apple.mpegurl",
         headers={
             "Access-Control-Allow-Origin": "*",
@@ -180,6 +190,27 @@ async def hls_playlist(cam_id: str, request: Request):
 
 _enc_key_cache: tuple[float, bytes] | None = None
 _ENC_KEY_TTL = 3600.0
+
+# Cloudflare fronts the CDN and throttles by source IP. Every viewer of the
+# video wall shares this backend's single egress IP, so a 9-16 tile grid can
+# push the whole deployment into 403s. Caching collapses N viewers into one
+# upstream fetch.
+#
+# Segments are safe to cache indefinitely: the playlist is EXT-X-PLAYLIST-TYPE
+# VOD over a looping feed, so seg00042.ts is always identical. Playlists get a
+# short TTL because they are cheap and rarely change.
+_playlist_cache: dict[str, tuple[float, str]] = {}
+_PLAYLIST_TTL = 5.0
+
+_segment_cache: "OrderedDict[str, bytes]" = OrderedDict()
+_SEGMENT_CACHE_MAX = 40  # ~270KB each → caps this cache near 11MB of the 512MB
+
+
+def _cache_segment(key: str, content: bytes) -> None:
+    _segment_cache[key] = content
+    _segment_cache.move_to_end(key)
+    while len(_segment_cache) > _SEGMENT_CACHE_MAX:
+        _segment_cache.popitem(last=False)
 
 
 @router.get("/hls/{cam_id}/enc.key")
@@ -232,16 +263,26 @@ async def hls_segment(cam_id: str, segment: str):
     if not segment.endswith(".ts") and not segment.endswith(".aac"):
         raise HTTPException(400, "Invalid segment type")
 
-    resp = await _upstream_get(
-        f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}", timeout=30
-    )
+    key = f"{cam_id}/{segment}"
+    content = _segment_cache.get(key)
+    if content is not None:
+        _segment_cache.move_to_end(key)
+    else:
+        resp = await _upstream_get(
+            f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}", timeout=30
+        )
+        content = resp.content
+        _cache_segment(key, content)
 
     return Response(
-        content=resp.content,
+        content=content,
         media_type="video/MP2T",
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "public, max-age=10",
+            # Segments are immutable for a given id, so let the browser hold
+            # them too — this is the main lever against Cloudflare throttling
+            # our single shared egress IP.
+            "Cache-Control": "public, max-age=3600",
         },
     )
 
