@@ -3,6 +3,8 @@ import { Search, Route, MapPin, Clock, Gauge, Car, Camera as CameraIcon, ImageOf
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup } from "react-leaflet";
 import { api, formatDateTime, snapshotUrl } from "../lib/api";
 
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
+
 // ── Snapshot thumbnails: lazy, capped-concurrency, never a broken-image icon ──
 // The /feeds/{id}/snapshot endpoint is slow, rate-limited (1 real capture per
 // camera per 8s server-side) and frequently fails upstream (502/503/504) until
@@ -34,7 +36,9 @@ function acquireSnapshotSlot(): Promise<() => void> {
   });
 }
 
-function SnapshotThumb({ cameraId, className }: { cameraId: number; className?: string }) {
+function SnapshotThumb({ cameraId, eventId, hasEvidence, className }: {
+  cameraId: number; eventId?: number; hasEvidence?: boolean; className?: string;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const releaseRef = useRef<(() => void) | null>(null);
   const [visible, setVisible] = useState(false);
@@ -62,9 +66,17 @@ function SnapshotThumb({ cameraId, className }: { cameraId: number; className?: 
     return () => obs.disconnect();
   }, []);
 
+  // A real evidence frame (the actual detection frame, captured by the edge
+  // worker at match time) always takes priority over a generic live camera
+  // snapshot — the two are not interchangeable: the live snapshot shows
+  // whatever is on that camera *right now*, unrelated to this sighting's
+  // actual timestamp/vehicle. Only fall back to it when no evidence exists.
+  const isRealEvidence = Boolean(hasEvidence && eventId);
   useEffect(() => {
     if (!visible) return;
-    const url = snapshotUrl(cameraId);
+    const url = isRealEvidence
+      ? `${API_BASE}/api/v1/vehicles/events/${eventId}/evidence`
+      : snapshotUrl(cameraId);
     if (!url) {
       setStatus("error");
       return;
@@ -83,7 +95,7 @@ function SnapshotThumb({ cameraId, className }: { cameraId: number; className?: 
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, cameraId]);
+  }, [visible, cameraId, eventId, isRealEvidence]);
 
   const finish = (ok: boolean) => {
     setStatus(ok ? "ready" : "error");
@@ -95,7 +107,7 @@ function SnapshotThumb({ cameraId, className }: { cameraId: number; className?: 
     <div
       ref={hostRef}
       className={`relative shrink-0 overflow-hidden rounded-lg bg-control-850 border border-control-800/60 ${className ?? "w-14 h-10"}`}
-      title={status === "error" ? "No frame available" : "Live camera snapshot"}
+      title={status === "error" ? "No frame available" : isRealEvidence ? "Real detection frame" : "Live camera snapshot (no detection frame recorded for this sighting)"}
     >
       {src && status !== "error" && (
         <img
@@ -138,6 +150,7 @@ interface Journey {
     timestamp: string;
     direction: string | null;
     confidence: number;
+    has_evidence_image?: boolean;
     vehicle_type: string | null;
     vehicle_color: string | null;
   }[];
@@ -292,7 +305,7 @@ export default function Vehicles() {
                   >
                     <Popup>
                       <div className="text-xs space-y-1.5">
-                        <SnapshotThumb cameraId={s.camera_id} className="w-40 h-24" />
+                        <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-40 h-24" />
                         <div className="font-semibold">{s.camera_name}</div>
                         <div className="font-mono text-[10px]">{formatDateTime(s.timestamp)}</div>
                         <div>dir: {s.direction ?? "—"} · conf {(s.confidence * 100).toFixed(0)}%</div>
@@ -319,7 +332,7 @@ export default function Vehicles() {
                 <div key={s.event_id}
                   className={`px-4 py-2.5 flex items-center gap-3 ${i < step ? "" : "opacity-50"}`}>
                   <div className={`w-2.5 h-2.5 rounded-full ${i < step ? "bg-orange-500" : "bg-control-700"}`} />
-                  <SnapshotThumb cameraId={s.camera_id} className="w-14 h-10" />
+                  <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-14 h-10" />
                   <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(s.timestamp)}</div>
                   <div className="flex-1 text-sm text-slate-300">{s.camera_name}</div>
                   <div className="text-xs text-slate-500 capitalize">{s.vehicle_type} · {s.direction}</div>
