@@ -32,39 +32,54 @@ _COOKIE_TTL = 1800  # re-auth every 30 min
 SPOOFED_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
 
 
+def _cookie_from_headers(resp: httpx.Response) -> str | None:
+    """Pull the session cookie straight off Set-Cookie headers."""
+    for raw in resp.headers.get_list("set-cookie"):
+        for part in raw.split(";"):
+            part = part.strip()
+            if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
+                return part.split("=", 1)[1]
+    return None
+
+
 async def _get_sentinel_cookie() -> str:
-    """Authenticate once, cache the cookie."""
+    """Authenticate against the Sentinel CDN once, then cache the session cookie.
+
+    The portal's sign-in form posts BOTH `email` and `password`. Posting only the
+    password re-renders the login page as HTTP 200 with no cookie, which is why
+    a password-only login looks like a success to naive status-code checks.
+    """
     global _cached_cookie, _cookie_fetched_at
 
     if _cached_cookie and (time.time() - _cookie_fetched_at) < _COOKIE_TTL:
         return _cached_cookie
 
-    password = settings.SENTINEL_PASSWORD or "E6W6-8SAJ-3S9Z"
-    if not password:
-        raise HTTPException(503, "SENTINEL_PASSWORD not configured")
+    email, password = settings.SENTINEL_EMAIL, settings.SENTINEL_PASSWORD
+    if not (email and password):
+        raise HTTPException(
+            503,
+            "Sentinel credentials not configured — set SENTINEL_EMAIL and "
+            "SENTINEL_PASSWORD in the environment",
+        )
 
     async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
         resp = await client.post(
             f"{settings.SENTINEL_HLS_BASE}/auth/login",
-            data={"password": password},
+            data={"email": email, "password": password},
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": SPOOFED_USER_AGENT
+                "User-Agent": SPOOFED_USER_AGENT,
             },
         )
-        
-        cookie = resp.cookies.get(SENTINEL_COOKIE_NAME)
-        if not cookie and resp.status_code == 302:
-            raw_cookie = resp.headers.get("set-cookie", "")
-            if SENTINEL_COOKIE_NAME in raw_cookie:
-                for part in raw_cookie.split(";"):
-                    part = part.strip()
-                    if part.startswith(f"{SENTINEL_COOKIE_NAME}="):
-                        cookie = part.split("=", 1)[1]
-                        break
-        
-        if not cookie:
-            raise HTTPException(502, f"Sentinel auth failed: HTTP {resp.status_code}")
+
+    cookie = resp.cookies.get(SENTINEL_COOKIE_NAME) or _cookie_from_headers(resp)
+    if not cookie:
+        raise HTTPException(
+            502,
+            f"Sentinel auth rejected (HTTP {resp.status_code}) — verify "
+            "SENTINEL_EMAIL/SENTINEL_PASSWORD and that the account is on the "
+            "grid's approved access list",
+        )
 
     _cached_cookie = cookie
     _cookie_fetched_at = time.time()

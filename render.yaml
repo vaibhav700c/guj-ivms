@@ -34,6 +34,9 @@ services:
         value: "rtsp://103.250.160.189:8554/stream"
       - key: SENTINEL_WHEP_BASE
         value: "http://103.250.160.189:8889/stream"
+      # Both credentials are required — the grid's login form posts email+password.
+      - key: SENTINEL_EMAIL
+        sync: false  # set in Render dashboard — do NOT commit to git
       - key: SENTINEL_PASSWORD
         sync: false  # set in Render dashboard — do NOT commit to git
 

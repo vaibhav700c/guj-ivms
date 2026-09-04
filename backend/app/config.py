@@ -33,11 +33,15 @@ class Settings(BaseSettings):
     # Seed
     SEED_ON_STARTUP: bool = True
 
-    # Sentinel Camera Grid — real stream infrastructure
+    # Sentinel Camera Grid — real stream infrastructure.
+    # The grid authenticates with the registered email + access password. Both are
+    # secrets: supply them via the environment (Render dashboard / backend/.env),
+    # never in source.
     SENTINEL_HLS_BASE: str = "https://cctv.corp8.cloud"
     SENTINEL_RTSP_BASE: str = "rtsp://103.250.160.189:8554/stream"
     SENTINEL_WHEP_BASE: str = "http://103.250.160.189:8889/stream"
-    SENTINEL_PASSWORD: str = ""  # set in Render dashboard (E6W6-8SAJ-3S9Z)
+    SENTINEL_EMAIL: str = ""
+    SENTINEL_PASSWORD: str = ""
     # Ingest federation
     INGEST_API_KEY: str = ""
 

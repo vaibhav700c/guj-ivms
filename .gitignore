@@ -15,6 +15,11 @@ dist/
 .env
 .env.local
 
+# Local-only planning + credential material (never commit — the Sentinel grid
+# access code lives in integration_camera.txt)
+plan.md
+integration_camera.txt
+
 # OS / IDE
 .DS_Store
 .idea/
