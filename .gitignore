@@ -30,3 +30,4 @@ integration_camera.txt
 # App data
 snapshots/
 .vercel/
+analytics/local_frames/

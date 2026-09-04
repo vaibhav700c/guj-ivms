@@ -37,6 +37,7 @@ Env: SENTINEL_EMAIL + SENTINEL_PASSWORD (REQUIRED — the grid answers 401 to
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import os
 import re
@@ -79,6 +80,15 @@ FACE_MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.45"))
 FACE_MIN_DETECT_CONF = float(os.environ.get("FACE_MIN_DETECT_CONF", "0.5"))
 PUSH_DETECTION_EVERY_S = float(os.environ.get("PUSH_DETECTION_EVERY_S", "10"))
 GALLERY_REFRESH_S = float(os.environ.get("GALLERY_REFRESH_S", "300"))
+
+# Optional: save the exact frame a match happened on and reference it from the
+# alert. Off by default (plain `worker.py run` behaves exactly as before — no
+# behaviour change, no extra disk I/O) so this only activates when something
+# (the local control server, for a demo) opts in by setting the directory.
+LOCAL_SNAPSHOT_DIR = os.environ.get("LOCAL_SNAPSHOT_DIR", "")
+LOCAL_SNAPSHOT_BASE_URL = os.environ.get(
+    "LOCAL_SNAPSHOT_BASE_URL", "http://localhost:8800/local-frames"
+).rstrip("/")
 
 # COCO classes: 2=car 3=motorcycle 5=bus 7=truck ; 0=person
 VEHICLE_CLASSES = {2, 3, 5, 7}
@@ -254,6 +264,51 @@ def external_id(camera_id: int) -> str:
     return f"cam{camera_id:02d}"
 
 
+def save_snapshot(camera_id: int, frame: np.ndarray) -> str | None:
+    """Persist the frame a match/detection happened on, return a fetchable URL.
+
+    No-op (returns None) unless LOCAL_SNAPSHOT_DIR is set — see comment above.
+    """
+    if not LOCAL_SNAPSHOT_DIR:
+        return None
+    try:
+        os.makedirs(LOCAL_SNAPSHOT_DIR, exist_ok=True)
+        name = f"{external_id(camera_id)}_{int(time.time() * 1000)}.jpg"
+        path = os.path.join(LOCAL_SNAPSHOT_DIR, name)
+        cv2.imwrite(path, frame)
+        return f"{LOCAL_SNAPSHOT_BASE_URL}/{name}"
+    except Exception:
+        log.exception("[%s] snapshot save failed", external_id(camera_id))
+        return None
+
+
+EVIDENCE_MAX_WIDTH = int(os.environ.get("EVIDENCE_MAX_WIDTH", "640"))
+EVIDENCE_JPEG_QUALITY = int(os.environ.get("EVIDENCE_JPEG_QUALITY", "80"))
+
+
+def encode_evidence_b64(frame: np.ndarray) -> str | None:
+    """Base64-JPEG the match frame for inline transport in the ingest payload.
+
+    Unlike save_snapshot()'s local-file URL (only fetchable from the operator's
+    own machine — fine for a same-machine demo, useless for anyone viewing the
+    deployed Vercel/Render app from elsewhere), this travels with the alert
+    itself through the real backend/DB and renders for any viewer, anywhere.
+    Small and resized: only sent on an actual match/push, not every frame.
+    """
+    try:
+        h, w = frame.shape[:2]
+        if w > EVIDENCE_MAX_WIDTH:
+            scale = EVIDENCE_MAX_WIDTH / w
+            frame = cv2.resize(frame, (EVIDENCE_MAX_WIDTH, int(h * scale)))
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, EVIDENCE_JPEG_QUALITY])
+        if not ok:
+            return None
+        return base64.b64encode(buf.tobytes()).decode("ascii")
+    except Exception:
+        log.exception("evidence encode failed")
+        return None
+
+
 # ── Model loading (graceful degradation per module) ──────────────────────────
 
 class Models:
@@ -345,7 +400,8 @@ class Ingest:
 
     def anpr(self, camera_id: int, plate_text: str, confidence: float,
              ocr_confidence: float | None = None, vehicle_type: str | None = None,
-             vehicle_color: str | None = None, ts_ms: float | None = None) -> dict | None:
+             vehicle_color: str | None = None, ts_ms: float | None = None,
+             snapshot_ref: str | None = None, evidence_image: str | None = None) -> dict | None:
         payload = {
             "camera_id": camera_id,
             "plate_text": plate_text,
@@ -353,6 +409,8 @@ class Ingest:
             "ocr_confidence": round(ocr_confidence, 3) if ocr_confidence else None,
             "vehicle_type": vehicle_type,
             "vehicle_color": vehicle_color,
+            "snapshot_ref": snapshot_ref,
+            "evidence_image": evidence_image,
             "source": "edge-yolo",
         }
         if ts_ms:
@@ -376,7 +434,10 @@ class Ingest:
 
     def watchlist_persons(self) -> list[dict]:
         try:
-            r = self.client.get(f"{INGEST_URL}/api/v1/watchlist?subject_type=person&active=true")
+            r = self.client.get(
+                f"{INGEST_URL}/api/v1/watchlist"
+                "?subject_type=person&active=true&include_embeddings=true"
+            )
             if r.status_code == 200:
                 return r.json().get("items", [])
         except Exception as exc:
@@ -431,12 +492,17 @@ class CameraPipeline(threading.Thread):
     """One RTSP source: capture thread + inference loop (latest-frame semantics)."""
 
     def __init__(self, camera_id: int, ingest: Ingest, yolo_lock: threading.Lock,
-                 face_gallery: FaceGallery) -> None:
+                 face_gallery: FaceGallery, video_source: str | int | None = None) -> None:
+        """`video_source`, when given, replaces the Sentinel RTSP feed with a local
+        file path or webcam device index (same idea, plan's "existing camera feed
+        infrastructure" extended to local/offline sources for a demo where the
+        Sentinel grid has no suitable footage for a given detection type)."""
         super().__init__(daemon=True, name=f"cam{camera_id:02d}")
         self.camera_id = camera_id
         self.ingest = ingest
         self.yolo_lock = yolo_lock
         self.face_gallery = face_gallery
+        self.video_source = video_source
         self.models = MODELS
         self.tracker = sv.ByteTrack() if (MODELS.yolo and sv is not None) else None
         self._latest_frame: np.ndarray | None = None
@@ -449,9 +515,18 @@ class CameraPipeline(threading.Thread):
         self._backoff = 2.0
         self._plate_voter = _PlateVoter()
         self.anpr_stats: dict[str, int] = defaultdict(int)
+        # Live status counters, read by the local control server (job status).
+        self.frames_processed = 0
+        self.faces_matched = 0
+
+    def stop(self) -> None:
+        self._stop.set()
 
     # ── capture thread: always hold the newest frame (drops stale frames) ──
     def _capture_loop(self) -> None:
+        if self.video_source is not None:
+            self._capture_loop_local()
+            return
         url = rtsp_url(self.camera_id)
         # integration.txt §2: force TCP — UDP across NAT yields corrupt frames
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
@@ -505,6 +580,39 @@ class CameraPipeline(threading.Thread):
             self._stop.wait(self._backoff)
             self._backoff = min(self._backoff * 2, 30.0)
 
+    def _capture_loop_local(self) -> None:
+        """Local file / webcam capture — mirrors the RTSP loop's semantics
+        (always hold the newest frame) but loops a file back to frame 0
+        instead of reconnecting, so a short demo clip behaves like a
+        continuously-running camera (the same "loops at the end" behaviour
+        integration.txt documents for the real Sentinel grid)."""
+        is_device = isinstance(self.video_source, int)
+        while not self._stop.is_set():
+            cap = cv2.VideoCapture(self.video_source)
+            if not cap.isOpened():
+                log.warning("[%s] local source %s did not open — retry in %.0fs",
+                            external_id(self.camera_id), self.video_source, self._backoff)
+                cap.release()
+                self._stop.wait(self._backoff)
+                self._backoff = min(self._backoff * 2, 30.0)
+                continue
+            log.info("[%s] local source connected (%s)", external_id(self.camera_id), self.video_source)
+            self._backoff = 2.0
+            try:
+                while not self._stop.is_set():
+                    ok, frame = cap.read()
+                    if not ok:
+                        if is_device:
+                            break  # real device drop — reconnect
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # file ended — loop
+                        continue
+                    with self._frame_lock:
+                        self._latest_frame = frame
+                        self._latest_pts = time.time() * 1000.0
+                    self._stop.wait(1.0 / max(SAMPLE_FPS * 2, 1.0))  # don't spin faster than needed
+            finally:
+                cap.release()
+
     # ── helpers ──
     def _xyxy_to_bbox(self, xyxy) -> dict:
         x1, y1, x2, y2 = [float(v) for v in xyxy]
@@ -538,7 +646,7 @@ class CameraPipeline(threading.Thread):
 
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
                           conf: float, ocr_conf: float, plate_box,
-                          detections) -> None:
+                          detections, frame: np.ndarray | None = None) -> None:
         """plate_text is already positionally-corrected + format-validated.
 
         Buffers into the per-camera voter (plan §5.2 multi-read voting); only
@@ -559,6 +667,8 @@ class CameraPipeline(threading.Thread):
             return
         self._last_plate_push[norm] = now
         self.anpr_stats["pushed"] += 1
+        snap = save_snapshot(self.camera_id, frame) if frame is not None else None
+        evidence = encode_evidence_b64(frame) if frame is not None else None
         result = self.ingest.anpr(
             camera_id=self.camera_id,
             plate_text=voted_text,
@@ -566,6 +676,8 @@ class CameraPipeline(threading.Thread):
             ocr_confidence=best_ocr_conf,
             vehicle_type=self._vehicle_type_at(plate_box, detections),
             ts_ms=frame_ts,
+            snapshot_ref=snap,
+            evidence_image=evidence,
         )
         tier = "HIGH" if best_ocr_conf >= PLATE_CONF_HIGH else "LOW-CONF"
         if result:
@@ -625,9 +737,16 @@ class CameraPipeline(threading.Thread):
             match = self.face_gallery.search(emb)
             if match:
                 entry_id, name, sim = match
+                self.faces_matched += 1
+                snap = save_snapshot(self.camera_id, frame)
+                evidence = encode_evidence_b64(frame)
                 metadata.update({"face_name": name,
                                  "matched_watchlist_id": entry_id,
                                  "similarity": round(sim, 3)})
+                if snap:
+                    metadata["snapshot_ref"] = snap
+                if evidence:
+                    metadata["evidence_image"] = evidence
                 log.info("[%s] FACE MATCH %s (cos %.2f) → alert path",
                          external_id(self.camera_id), name, sim)
             self.ingest.detection(
@@ -653,6 +772,7 @@ class CameraPipeline(threading.Thread):
                 continue
             try:
                 self._process_frame(frame, frame_ts)
+                self.frames_processed += 1
             except Exception:
                 log.exception("[%s] inference tick failed", external_id(self.camera_id))
             elapsed = time.time() - loop_start
@@ -731,7 +851,8 @@ class CameraPipeline(threading.Thread):
                         self._maybe_push_plate(
                             frame_ts, corrected, conf, ocr_conf,
                             (x1, y1, x2 - x1, y2 - y1),
-                            detections if detections is not None else [])
+                            detections if detections is not None else [],
+                            frame=frame)
             except Exception:
                 log.exception("[%s] plate pass failed", external_id(self.camera_id))
 
@@ -764,7 +885,7 @@ def cmd_run(args) -> None:
     except KeyboardInterrupt:
         log.info("shutting down…")
         for p in pipelines:
-            p._stop.set()
+            p.stop()
 
 
 def cmd_test_rtsp(args) -> None:

@@ -11,5 +11,13 @@ onnxruntime>=1.19.0           # ONNX inference runtime
 httpx>=0.28.1                 # ingest API client
 numpy<2                       # torch 2.2 (last macOS x86 build) + ultralytics Darwin constraint
 polars>=0.20.0,<0.21          # ultralytics dep — newer polars (>=1.x) requires numpy>=2
-# Optional — real face recognition (plan §6). Large model download (~330 MB):
-# insightface>=0.7.3          # SCRFD detection + ArcFace embeddings
+# Real face recognition (plan §6 / Investigate wanted-person search). Large
+# model download (~330 MB) on first run — everything degrades gracefully
+# (worker.py logs and disables the face module) if this fails to install:
+insightface>=0.7.3            # SCRFD detection + ArcFace embeddings
+
+# control_server.py — local-only HTTP bridge for the Investigate feature
+# (wanted-person photo upload + live plate watch). Never deployed to Render.
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.9        # required by FastAPI for UploadFile/Form
