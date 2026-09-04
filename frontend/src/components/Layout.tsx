@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Video, MonitorPlay, Map as MapIcon,
   Car, Siren, ListChecks, BarChart3, ShieldCheck, LogOut,
-  Bell, BellOff, WifiOff, ChevronRight, ScanLine, Loader2,
+  Bell, BellOff, WifiOff, ChevronRight, ScanLine, Loader2, UserSearch,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../store/auth";
@@ -18,6 +18,7 @@ const NAV = [
   { to: "/alerts",    label: "Live Alerts",     icon: Siren },
   { to: "/anpr",      label: "ANPR Detections", icon: ScanLine },
   { to: "/watchlist", label: "Watchlist",        icon: ListChecks },
+  { to: "/investigate", label: "Investigate",    icon: UserSearch },
   { to: "/analytics", label: "Analytics",        icon: BarChart3 },
 ];
 

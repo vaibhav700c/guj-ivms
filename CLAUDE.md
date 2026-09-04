@@ -45,6 +45,18 @@ config/      mediamtx.yml — only for the full local docker-compose stack.
 Both feed the same correlation engine. When something looks "too good", check
 which source produced it.
 
+3. **`analytics/control_server.py`** — a third, on-demand source: a local-only
+   FastAPI bridge (frontend **Investigate** page → `POST /api/local/monitor/start`)
+   that starts/stops real `CameraPipeline`s against operator-selected cameras,
+   for "upload a wanted-person photo" / "watch for this plate" workflows. Reuses
+   `CameraPipeline`/`FaceGallery`/`Ingest` from `worker.py` entirely — not a
+   second detection system. Never deployed to Render (same ~2GB RAM reason as
+   `worker.py`). `analytics/demo_assets/` holds bundled local video clips + a
+   reference photo (built by `demo_assets/make_demo_clips.py` from insightface's
+   own bundled multi-face test image, `t1.jpg` — **not** the also-bundled
+   `Tom_Hanks_54745.png`, which is a pre-cropped 112×112 ArcFace *input*, not a
+   photo: the real pipeline's det_size=640 detects zero faces in it).
+
 ## Local setup
 
 **Python 3.10+ is required** — the codebase uses PEP 604 (`X | None`) syntax and

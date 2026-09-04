@@ -23,6 +23,7 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 | Central analytics: ANPR events, detections, tiering (A/B/C), VAHAN-like registry | Model 4 | `backend/app/routes/{analytics,vehicles}.py` |
 | Watchlist correlation engine → real-time WebSocket alerts | Model 4 | `backend/app/alert_engine.py`, **Live Alerts** page (ack/resolve workflow + sound) |
 | Face-recognition correlation for wanted/missing persons (Tier A) | plan §6 | `backend/app/alert_engine.py` → `watchlist_person` alerts |
+| **Investigate** — upload a wanted-person photo or enter a plate, pick camera(s), run real YOLOv8/InsightFace/plate-OCR against them live | plan §6/§7 | frontend **Investigate** page → `analytics/control_server.py` (local-only; see below) |
 | Vehicle search & journey reconstruction (haversine legs, implied speeds, map replay, probable OCR matches) | plan §7 / §20.2 | **Vehicle Search** page |
 | Camera health monitoring (time-series health log, feeds/status) | plan §9.1 / §13 | `GET /cameras/{id}/health-log`, `/feeds/status` |
 | GIS coverage + gap analysis report | plan §9.2 / §13 | `GET /cameras/geo/coverage`, `/cameras/gap-analysis` |
@@ -63,6 +64,27 @@ npm install && npm run dev        # http://localhost:5173
 ```
 
 Login: `admin / admin123` (or any visit — demo mode auto-authenticates when `REQUIRE_AUTH=false`).
+
+## Investigate — wanted-person photo search & live plate watch (local only)
+
+The real CV stack (YOLOv8 + InsightFace ArcFace + plate OCR, ~2GB RAM) never runs on
+Render's 512MB free tier — it runs on your own machine, from the same `analytics/`
+worker code the edge pipeline already uses:
+
+```bash
+cd analytics
+python -m venv .venv && .venv/bin/pip install -r requirements.txt   # pulls insightface (~330MB models, first run)
+.venv/bin/uvicorn control_server:app --port 8800
+```
+
+Then open the **Investigate** page in the app (works against the deployed
+`https://guj-ivms.vercel.app` too — `http://localhost:8800` fetches from an HTTPS page
+are not blocked as mixed content, since `localhost` is a spec'd trustworthy origin).
+Upload a reference photo (or enter a plate), pick which camera(s) to run against —
+including the bundled `analytics/demo_assets/*.mp4` clips if you don't have a suitable
+live face/plate on the Sentinel grid — and start monitoring. Matches raise real alerts
+(camera, timestamp, confidence, the actual detection frame) on **Live Alerts** and the
+**GIS Map**, same as the always-on edge worker.
 
 ## Full stack (Postgres + PostGIS + Redis + MinIO + MediaMTX)
 
