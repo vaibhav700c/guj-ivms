@@ -165,10 +165,15 @@ export default function LiveView() {
           </div>
         ) : (
           <div className={`flex-1 grid gap-2 ${GRID_CLASS[layout]}`} style={{ alignContent: "start" }}>
+            {/* 300ms/tile stagger: the backend's own upstream semaphore
+                (sentinel.py, concurrency=2) already protects the Cloudflare-
+                facing egress IP, so this only needs to avoid bunching inbound
+                connection opens — 1200ms added ~3.6s of pure artificial delay
+                to the last tile in a 2x2 grid. */}
             {shown.map((c, i) => (
               <StreamTile key={c.id} camera={c} clock={clock}
                 onExpand={() => setFocus(c)} proxyUrl={proxyHlsUrl(c)}
-                startDelayMs={i * 1200} />
+                startDelayMs={i * 300} />
             ))}
             {shown.length === 0 && (
               <div className="card col-span-full p-16 flex flex-col items-center gap-3 text-slate-600">
