@@ -63,15 +63,13 @@ async def _get_sentinel_cookie() -> str:
             "SENTINEL_PASSWORD in the environment",
         )
 
-    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-        resp = await client.post(
-            f"{settings.SENTINEL_HLS_BASE}/auth/login",
-            data={"email": email, "password": password},
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": SPOOFED_USER_AGENT,
-            },
-        )
+    resp = await _client().post(
+        f"{settings.SENTINEL_HLS_BASE}/auth/login",
+        data={"email": email, "password": password},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=15,
+        follow_redirects=False,  # the 302 carries Set-Cookie; following it loses the cookie
+    )
 
     cookie = resp.cookies.get(SENTINEL_COOKIE_NAME) or _cookie_from_headers(resp)
     if not cookie:
@@ -119,13 +117,45 @@ def _gate() -> asyncio.Semaphore:
     return _upstream_gate
 
 
-async def _fetch_once(url: str, cookie: str, timeout: float) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        return await client.get(
-            url,
-            cookies={SENTINEL_COOKIE_NAME: cookie},
+_http_client: httpx.AsyncClient | None = None
+
+
+def _client() -> httpx.AsyncClient:
+    """Shared, connection-pooled client for every Sentinel fetch.
+
+    A fresh `httpx.AsyncClient` per request (the previous behaviour) pays a
+    full TCP+TLS handshake to the Cloudflare-fronted CDN every single time —
+    measured directly against production, this was the dominant cost even
+    once the upstream_gate concurrency was widened (a 3x3 grid still saw
+    several-second per-request latency and some ERR_ABORTEDs at the client's
+    ~20s timeout). Reusing keep-alive connections cuts that to a plain
+    request/response for anything but the first hit.
+
+    A pooled client WAS tried and reverted once before (commit 3ede522), but
+    that version had no upstream_gate at all — every tile fired straight at
+    Cloudflare with only the connection pool as an implicit cap, a different
+    (unbounded) failure mode. Pooling *behind* the existing gate, sized
+    comfortably above _UPSTREAM_CONCURRENCY so the gate stays the actual
+    bottleneck, hasn't been tried before.
+
+    Lazily created so it binds to the running event loop, not import time.
+    """
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
             headers={"User-Agent": SPOOFED_USER_AGENT},
         )
+    return _http_client
+
+
+async def _fetch_once(url: str, cookie: str, timeout: float) -> httpx.Response:
+    return await _client().get(
+        url,
+        cookies={SENTINEL_COOKIE_NAME: cookie},
+        timeout=timeout,
+        follow_redirects=True,
+    )
 
 
 async def _do_upstream_get(url: str, timeout: float) -> httpx.Response:
@@ -288,12 +318,12 @@ async def hls_enc_key(cam_id: str):
 
     cookie = await _get_sentinel_cookie()
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get(
-                f"{settings.SENTINEL_HLS_BASE}/enc.key",
-                cookies={SENTINEL_COOKIE_NAME: cookie},
-                headers={"User-Agent": SPOOFED_USER_AGENT},
-            )
+        resp = await _client().get(
+            f"{settings.SENTINEL_HLS_BASE}/enc.key",
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            timeout=20,
+            follow_redirects=True,
+        )
     except httpx.HTTPError as exc:
         # Transport-level failures were surfacing as opaque 500s.
         raise HTTPException(502, f"Encryption key fetch failed: {exc}") from exc
@@ -348,14 +378,14 @@ async def hls_segment(cam_id: str, segment: str):
 
 async def _fetch_sentinel_catalogue() -> list[dict]:
     cookie = await _get_sentinel_cookie()
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-        resp = await client.get(
-            f"{settings.SENTINEL_HLS_BASE}/cameras.json",
-            cookies={SENTINEL_COOKIE_NAME: cookie},
-            headers={"User-Agent": SPOOFED_USER_AGENT},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    resp = await _client().get(
+        f"{settings.SENTINEL_HLS_BASE}/cameras.json",
+        cookies={SENTINEL_COOKIE_NAME: cookie},
+        timeout=15,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 @router.get("/catalogue")
