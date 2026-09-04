@@ -71,6 +71,7 @@ CAMERA_IDS = [int(c) for c in os.environ.get("CAMERA_IDS", "1,6,12").split(",") 
 SAMPLE_FPS = float(os.environ.get("SAMPLE_FPS", "2.0"))        # inference rate per camera
 FACE_EVERY_S = float(os.environ.get("FACE_EVERY_S", "15"))     # face pass cadence
 PLATE_MIN_CONF = float(os.environ.get("PLATE_MIN_CONF", "0.5"))       # < this → discard (plan §5.2)
+PLATE_MIN_WIDTH_PX = int(os.environ.get("PLATE_MIN_WIDTH_PX", "60"))  # plan §4 anpr_config
 PLATE_CONF_HIGH = float(os.environ.get("PLATE_CONF_HIGH", "0.7"))     # >= this → high-confidence
 PLATE_MIN_VOTES = int(os.environ.get("PLATE_MIN_VOTES", "2"))         # corroborating reads required
 PLATE_VOTE_WINDOW_S = float(os.environ.get("PLATE_VOTE_WINDOW_S", "5.0"))
@@ -688,6 +689,17 @@ class CameraPipeline(threading.Thread):
                     x1, y1, x2, y2 = [int(v) for v in pbox.xyxy[0]]
                     crop = frame[max(y1, 0):y2, max(x1, 0):x2]
                     if crop.size == 0:
+                        continue
+                    # plan §4 sets plate_min_width_px=60 for ANPR cameras, and
+                    # this guard was missing. Below roughly that width there are
+                    # not enough pixels per character to read, and the OCR does
+                    # not fail cleanly — it hallucinates. Measured on real 35-64px
+                    # crops from cam12: every preprocessing variant (upscale,
+                    # CLAHE, Otsu, adaptive+denoise, sharpen) returned a DIFFERENT
+                    # string for the same crop and zero passed format validation.
+                    # Dropping these early saves CPU and keeps noise out of OCR.
+                    if crop.shape[1] < PLATE_MIN_WIDTH_PX:
+                        self.anpr_stats["rejected_too_small"] += 1
                         continue
                     # The pinned OCR model is single-channel. Passing a 3-channel
                     # BGR crop fails ONNX shape validation on the channel axis,
