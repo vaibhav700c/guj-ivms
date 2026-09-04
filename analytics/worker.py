@@ -444,6 +444,23 @@ class Ingest:
             log.warning("gallery fetch failed: %s", exc)
         return []
 
+    def camera_config(self, camera_id: int) -> dict:
+        """analytics_config for one camera — real per-camera capability audit
+        (plate_readable/face_readable) where available, so the pipeline
+        doesn't burn CPU (and risk OCR hallucination, see CLAUDE.md) running
+        ANPR/face on a feed already confirmed illegible. Missing/unreachable
+        defaults to {} → CameraPipeline treats that as "attempt both", the
+        prior behaviour, so an unaudited or offline backend never silently
+        disables anything.
+        """
+        try:
+            r = self.client.get(f"{INGEST_URL}/api/v1/cameras/{camera_id}")
+            if r.status_code == 200:
+                return r.json().get("analytics_config") or {}
+        except Exception as exc:
+            log.warning("[%s] camera config fetch failed: %s", external_id(camera_id), exc)
+        return {}
+
 
 # ── Face gallery (plan §6 — real ArcFace embeddings + cosine search) ─────────
 
@@ -515,6 +532,12 @@ class CameraPipeline(threading.Thread):
         self._backoff = 2.0
         self._plate_voter = _PlateVoter()
         self.anpr_stats: dict[str, int] = defaultdict(int)
+        cfg = ingest.camera_config(camera_id)
+        self.plate_readable = cfg.get("plate_readable", True)
+        self.face_readable = cfg.get("face_readable", True)
+        if not (self.plate_readable and self.face_readable):
+            log.info("[%s] capability audit: plate_readable=%s face_readable=%s — skipping the other pass(es)",
+                      external_id(camera_id), self.plate_readable, self.face_readable)
         # Live status counters, read by the local control server (job status).
         self.frames_processed = 0
         self.faces_matched = 0
@@ -797,7 +820,7 @@ class CameraPipeline(threading.Thread):
                 self._push_tracks(detections)
 
         # 2) ANPR — plate localization (YOLO) + OCR (fast-plate-ocr), plan §5
-        if self.models.plate_det and self.models.plate_ocr:
+        if self.models.plate_det and self.models.plate_ocr and self.plate_readable:
             try:
                 with self.yolo_lock:
                     plate_results = self.models.plate_det.predict(
@@ -857,7 +880,7 @@ class CameraPipeline(threading.Thread):
                 log.exception("[%s] plate pass failed", external_id(self.camera_id))
 
         # 3) Face recognition (plan §6) — cadence-limited
-        if self.models.face_app and time.time() - self._last_face_pass >= FACE_EVERY_S:
+        if self.models.face_app and self.face_readable and time.time() - self._last_face_pass >= FACE_EVERY_S:
             self._last_face_pass = time.time()
             self._face_pass(frame)
 

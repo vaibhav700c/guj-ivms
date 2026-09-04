@@ -61,6 +61,7 @@ def serialize(c: Camera) -> dict:
         "health_score": c.health_score,
         "last_seen": c.last_seen.isoformat() if c.last_seen else None,
         "analytics_tier": c.analytics_tier,
+        "analytics_config": c.analytics_config,
         "department_id": c.department_id,
         "has_ir": c.has_ir,
         "has_ptz": c.has_ptz,

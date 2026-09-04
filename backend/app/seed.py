@@ -9,7 +9,7 @@ import random
 from sqlalchemy.orm import Session
 
 from app.models import Camera, Department, User, VehicleRecord, WatchlistEntry
-from app.seed_data import SENTINEL_CAMERAS
+from app.seed_data import CAMERA_CAPABILITY_NOTES, SENTINEL_CAMERAS
 from app.security import hash_password
 from app.seed_watchlist import VAHAN_RECORDS, WATCHLIST
 
@@ -78,12 +78,48 @@ def seed(db: Session) -> None:
                     "fps_target": 5 if tier == "A" else 2,
                     "rtsp_transport": "tcp",
                     "sentinel_id": sid,
+                    # Real capability audit where available (cam01-15);
+                    # unaudited cameras default to "attempt it" per tier, so
+                    # this never silently disables ANPR/face on a camera that
+                    # was never actually checked.
+                    "plate_readable": CAMERA_CAPABILITY_NOTES.get(sid, {}).get("plate_readable", tier == "A"),
+                    "face_readable": CAMERA_CAPABILITY_NOTES.get(sid, {}).get("face_readable", tier == "A"),
+                    **({"capability_notes": CAMERA_CAPABILITY_NOTES[sid]["notes"]} if sid in CAMERA_CAPABILITY_NOTES else {}),
                 },
             ))
 
         db.add_all(cameras)
         db.commit()
         logger.info("Seeded %d Sentinel Grid cameras", len(cameras))
+    else:
+        # Cameras already exist (every real deploy after the first boot) —
+        # the bulk-seed block above never runs again, so a corrected tier or
+        # capability audit in SENTINEL_CAMERAS/CAMERA_CAPABILITY_NOTES would
+        # otherwise never reach an already-seeded database. Sync just the
+        # tier + audited fields by external_id; leave everything else
+        # (status, health_score, coordinates, etc.) alone.
+        by_external_id = {c.external_id: c for c in db.query(Camera).all()}
+        synced = 0
+        for sid, _name, _city, _district, _lat, _lng, _ctype, tier, _road in SENTINEL_CAMERAS:
+            cam = by_external_id.get(sid)
+            if cam is None:
+                continue
+            note = CAMERA_CAPABILITY_NOTES.get(sid, {})
+            new_plate = note.get("plate_readable", tier == "A")
+            new_face = note.get("face_readable", tier == "A")
+            cfg = dict(cam.analytics_config or {})
+            changed = cam.analytics_tier != tier or cfg.get("plate_readable") != new_plate or cfg.get("face_readable") != new_face
+            if changed:
+                cam.analytics_tier = tier
+                cfg["plate_readable"] = new_plate
+                cfg["face_readable"] = new_face
+                if "notes" in note:
+                    cfg["capability_notes"] = note["notes"]
+                cam.analytics_config = cfg
+                synced += 1
+        if synced:
+            db.commit()
+            logger.info("Synced tier/capability audit for %d existing camera(s)", synced)
 
     # ── Watchlist ─────────────────────────────────────────────────────────────
     if db.query(WatchlistEntry).count() == 0:
