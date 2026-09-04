@@ -82,7 +82,11 @@ def feed_url(camera_id: int, db: Session = Depends(get_db)):
 # ── Snapshot capture (plan §13 feeds/{camera_id}/snapshot) ────────────────────
 
 _snapshot_cache: dict[int, tuple[float, bytes]] = {}
-_SNAPSHOT_TTL = 8.0  # seconds — one capture per camera per 8s window
+# Render's free tier gives 0.1 CPU, and each capture spawns an ffmpeg that must
+# fetch an encrypted HLS segment and decode it. A short TTL meant a page showing
+# thumbnails for several cameras spawned overlapping ffmpegs that starved each
+# other, so cached frames are held for a minute instead.
+_SNAPSHOT_TTL = 60.0
 
 
 async def _capture_frame(cam_id: str) -> bytes:
@@ -105,15 +109,18 @@ async def _capture_frame(cam_id: str) -> bytes:
         # to present the same UA the HLS proxy uses — a custom one gets denied
         # even with a valid session cookie.
         "-user_agent", SPOOFED_USER_AGENT,
-        "-rw_timeout", "15000000",  # 15s IO timeout (microseconds)
+        "-rw_timeout", "20000000",  # 20s IO timeout (microseconds)
+        # Cap stream probing — the default inspects far more of the input than
+        # is needed for a single frame, which is expensive on 0.1 CPU.
+        "-probesize", "500000", "-analyzeduration", "1000000",
         "-i", url,
-        "-frames:v", "1", "-q:v", "3", "-f", "image2", "pipe:1",
+        "-frames:v", "1", "-q:v", "4", "-f", "image2", "pipe:1",
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=55)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
