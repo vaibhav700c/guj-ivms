@@ -30,7 +30,7 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 | Live snapshot capture (`GET /feeds/{id}/snapshot`, ffmpeg over live HLS) | plan §13 | `backend/app/routes/feeds.py` |
 | Watchlist bulk import (JSON/CSV) + PDF report exports | plan §13 / §20 | `POST /watchlist/bulk-import`, `GET /reports/{kind}.pdf` |
 | Per-camera analytics WebSocket (`/ws/analytics/{camera_id}`) | plan §13 | `backend/app/routes/ws.py` |
-| Backend test suite (19 e2e tests: ingest→alert→resolve, journey, PDF, RBAC) | robustness | `backend/tests/` |
+| Backend test suite (24 e2e tests: ingest→alert→resolve, journey, PDF, RBAC, audit trail, rate limiting) | robustness | `backend/tests/` |
 | Demo simulator (edge-node emulation) — makes the deployed product live-demoable | plan §20 | `backend/app/simulator.py` |
 | JWT + RBAC auth, PBKDF2 password hashing, user management | plan §17 | `backend/app/security.py`, `routes/users.py` |
 
