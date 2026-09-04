@@ -240,7 +240,25 @@ def _parse_upstream_playlist(cam_id: str, content: str) -> tuple[list[tuple[floa
 # wrap-around point (the "scene cuts abruptly" moment) so the player expects
 # it instead of treating it as an error.
 _loop_epoch: dict[str, float] = {}
-_LIVE_WINDOW_SEGMENTS = 6
+# Measured live (Playwright, 90s network capture against production): tying
+# the window continuously to raw wall-clock time meant every distinct
+# refresh/tile requested different segments, destroying the cache-sharing
+# that keeps this backend afloat on a single free-tier instance — a cascade
+# of every camera's playlist request timing out simultaneously followed.
+# Snapping to a coarse time bucket means every viewer within the same ~90s
+# window requests the exact same handful of segments (cache-friendly, like
+# before this feature existed) while the position still visibly advances
+# every ~90s instead of being frozen at segment 0 forever (the original
+# "restarts like a video on every refresh" complaint).
+_LIVE_POSITION_BUCKET_S = 90.0
+# hls.js's own buffer target (maxBufferLength/maxMaxBufferLength in
+# LiveView.tsx) caps how far ahead it actually pre-fetches at once, so a
+# window much longer than what it buffers doesn't cost extra real fetches —
+# but the window must list enough segments to bridge a FULL bucket interval,
+# or playback runs out of listed content and genuinely stalls waiting for the
+# next bucket. ~6.3s/segment measured live, so 18 segments (~113s) covers a
+# 90s bucket with margin.
+_LIVE_WINDOW_SEGMENTS = 18
 
 
 @router.get("/hls/{cam_id}/index.m3u8")
@@ -261,8 +279,9 @@ async def hls_playlist(cam_id: str, request: Request):
         raise HTTPException(502, "Upstream playlist had no segments")
 
     epoch = _loop_epoch.setdefault(cam_id, now)
+    bucketed_now = (now // _LIVE_POSITION_BUCKET_S) * _LIVE_POSITION_BUCKET_S
     avg_dur = sum(d for d, _ in segments) / len(segments)
-    global_seq = int((now - epoch) / avg_dur)
+    global_seq = int((bucketed_now - epoch) / avg_dur)
     start_idx = global_seq % len(segments)
     window = [segments[(start_idx + i) % len(segments)] for i in range(_LIVE_WINDOW_SEGMENTS)]
     target_duration = max(int(d) for d, _ in window) + 1
