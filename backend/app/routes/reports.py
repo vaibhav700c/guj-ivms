@@ -5,14 +5,19 @@ Plan §13 /reports + §20 Week 3 "Analytics export (PDF/CSV reports)".
 import csv
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from sqlalchemy.orm import Session, joinedload
 
 from app.db import get_db
 from app.models import Alert, ANPREvent, Camera
 from app.pdf import build_pdf
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+# Hard ceiling on any exported row count. Render's free tier has 512MB RAM
+# and no autoscaling — a caller passing `?limit=5000000` on a CSV/PDF export
+# must not be able to force the whole ANPR table into memory at once.
+MAX_EXPORT_LIMIT = 5000
 
 
 def _csv_response(filename: str, header: list[str], rows) -> Response:
@@ -37,7 +42,15 @@ def _pdf_response(filename: str, title: str, header: list[str], rows) -> Respons
 
 
 def _alert_rows(db: Session):
-    alerts = db.query(Alert).order_by(Alert.timestamp.desc()).limit(5000).all()
+    # joinedload(Alert.camera) turns what was up to 5000 lazy-loaded
+    # `a.camera` round-trips into a single SELECT ... JOIN cameras query.
+    alerts = (
+        db.query(Alert)
+        .options(joinedload(Alert.camera))
+        .order_by(Alert.timestamp.desc())
+        .limit(MAX_EXPORT_LIMIT)
+        .all()
+    )
     header = ["id", "type", "severity", "identifier", "camera", "status", "timestamp"]
     rows = [
         [a.id, a.alert_type, a.severity, a.detected_identifier,
@@ -48,8 +61,16 @@ def _alert_rows(db: Session):
     return header, rows
 
 
-def _anpr_rows(db: Session, limit: int = 5000):
-    events = db.query(ANPREvent).order_by(ANPREvent.timestamp.desc()).limit(limit).all()
+def _anpr_rows(db: Session, limit: int = MAX_EXPORT_LIMIT):
+    # Same fix as above: eager-load ANPREvent.camera instead of one query
+    # per row (up to `limit` extra round-trips previously).
+    events = (
+        db.query(ANPREvent)
+        .options(joinedload(ANPREvent.camera))
+        .order_by(ANPREvent.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
     header = ["id", "plate", "camera", "vehicle_type", "direction", "confidence", "timestamp"]
     rows = [
         [e.id, e.plate_text, e.camera.name if e.camera else e.camera_id,
@@ -84,13 +105,19 @@ def export_alerts_pdf(db: Session = Depends(get_db)):
 
 
 @router.get("/anpr.csv")
-def export_anpr(db: Session = Depends(get_db), limit: int = 5000):
+def export_anpr(
+    db: Session = Depends(get_db),
+    limit: int = Query(MAX_EXPORT_LIMIT, ge=1, le=MAX_EXPORT_LIMIT),
+):
     header, rows = _anpr_rows(db, limit)
     return _csv_response("anpr_events.csv", header, rows)
 
 
 @router.get("/anpr.pdf")
-def export_anpr_pdf(db: Session = Depends(get_db), limit: int = 5000):
+def export_anpr_pdf(
+    db: Session = Depends(get_db),
+    limit: int = Query(MAX_EXPORT_LIMIT, ge=1, le=MAX_EXPORT_LIMIT),
+):
     header, rows = _anpr_rows(db, limit)
     return _pdf_response("anpr_events.pdf", "ANPR Detection Report", header, rows)
 

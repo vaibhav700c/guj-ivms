@@ -8,6 +8,7 @@ to all connected control-room clients in real time.
 import logging
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.eventbus import event_bus
@@ -31,25 +32,54 @@ def fuzzy_plate_match(a: str, b: str, threshold: float = 0.85) -> bool:
     return SequenceMatcher(None, a, b).ratio() >= threshold
 
 
+def _normalized_identifier_col():
+    """SQL-side normalization mirroring `normalize_plate` for the common case
+    (identifiers are human-formatted, e.g. "GJ 01 AB 1234" or "GJ-01-AB-1234").
+
+    Lets the common "is this plate on the watchlist at all" check run as a
+    single targeted DB query instead of hydrating every active watchlist
+    entry into Python on every ingested event (plan §17.1 — ingest hot path,
+    simulator fires every 2s). Same convention already used by
+    `vehicles._registry_query` for VAHAN registry lookups.
+    """
+    return func.upper(
+        func.replace(func.replace(WatchlistEntry.identifier, " ", ""), "-", "")
+    )
+
+
 class AlertEngine:
     def evaluate_anpr_event(self, db: Session, event: ANPREvent) -> Alert | None:
-        """Match one ANPR event against the active watchlist (plan §8)."""
-        entries = (
+        """Match one ANPR event against the active watchlist (plan §8).
+
+        Exact match is tried first as a single indexed-ish query scoped to
+        active vehicle entries (0-1 rows, no Python scan). The expensive
+        per-entry fuzzy (OCR-tolerant) scan only runs — and only then loads
+        the full active-entry list — when the exact query misses, which is
+        the one case where a full comparison is unavoidable.
+        """
+        match: WatchlistEntry | None = (
             db.query(WatchlistEntry)
             .filter(
                 WatchlistEntry.active.is_(True),
                 WatchlistEntry.subject_type == "vehicle",
+                _normalized_identifier_col() == event.plate_normalized,
             )
-            .all()
+            .first()
         )
-        match: WatchlistEntry | None = None
-        exact = False
-        for entry in entries:
-            if normalize_plate(entry.identifier) == event.plate_normalized:
-                match, exact = entry, True
-                break
-            if fuzzy_plate_match(entry.identifier, event.plate_text):
-                match = entry  # probable match — keep scanning for exact
+        exact = match is not None
+        if match is None:
+            entries = (
+                db.query(WatchlistEntry)
+                .filter(
+                    WatchlistEntry.active.is_(True),
+                    WatchlistEntry.subject_type == "vehicle",
+                )
+                .all()
+            )
+            for entry in entries:
+                if fuzzy_plate_match(entry.identifier, event.plate_text):
+                    match = entry
+                    break
         if match is None:
             return None
 
@@ -97,21 +127,22 @@ class AlertEngine:
            `reference_embedding`s (real matching on server).
         3. Token/name fallback — demo-mode matching for the simulator.
         """
-        entries = (
-            db.query(WatchlistEntry)
-            .filter(
-                WatchlistEntry.active.is_(True),
-                WatchlistEntry.subject_type == "person",
-            )
-            .all()
-        )
-
         match: WatchlistEntry | None = None
         sim_used: float | None = similarity
         match_mode = "demo"
 
         if matched_watchlist_id is not None:
-            match = next((e for e in entries if e.id == matched_watchlist_id), None)
+            # Edge already ran on-device ArcFace gallery search — a single
+            # PK lookup, no need to hydrate the whole active-person table.
+            match = (
+                db.query(WatchlistEntry)
+                .filter(
+                    WatchlistEntry.id == matched_watchlist_id,
+                    WatchlistEntry.active.is_(True),
+                    WatchlistEntry.subject_type == "person",
+                )
+                .first()
+            )
             match_mode = "edge-arcface"
         elif embedding:
             import math
@@ -122,6 +153,14 @@ class AlertEngine:
                 db_ = math.sqrt(sum(y * y for y in b))
                 return num / (da * db_ + 1e-9)
 
+            entries = (
+                db.query(WatchlistEntry)
+                .filter(
+                    WatchlistEntry.active.is_(True),
+                    WatchlistEntry.subject_type == "person",
+                )
+                .all()
+            )
             best_sim = 0.0
             for entry in entries:
                 ref = entry.reference_embedding
@@ -140,6 +179,14 @@ class AlertEngine:
             # token overlap on name, tiny random hit rate.
             import random
 
+            entries = (
+                db.query(WatchlistEntry)
+                .filter(
+                    WatchlistEntry.active.is_(True),
+                    WatchlistEntry.subject_type == "person",
+                )
+                .all()
+            )
             for entry in entries:
                 token_match = any(
                     tok in entry.identifier.lower()

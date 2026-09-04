@@ -391,3 +391,52 @@ def test_system_adapters_and_health(client):
     assert "sentinel" in body["registry"]        # connector registry (plan §11.2)
     assert "connected_vms_vendors" in body
     assert client.get("/api/v1/system/health").json()["status"] == "ok"
+
+
+# ── Hardening: bounded limits + rate limiting (Render free-tier) ────────────
+
+def test_report_and_vehicle_limits_are_capped(client):
+    """A caller cannot force an unbounded export/scan by passing a huge
+    `limit` — over-range values are rejected with 422 rather than silently
+    trying to load millions of rows into a 512MB container."""
+    # reports.py — CSV/PDF export limits
+    assert client.get("/api/v1/reports/anpr.csv?limit=5000000").status_code == 422
+    assert client.get("/api/v1/reports/anpr.pdf?limit=5000000").status_code == 422
+    assert client.get("/api/v1/reports/anpr.csv?limit=5000").status_code == 200  # still within cap
+
+    # vehicles.py
+    assert client.get("/api/v1/vehicles?limit=999999").status_code == 422
+    assert client.get("/api/v1/vehicles/recent?limit=999999").status_code == 422
+    assert client.get("/api/v1/vehicles/traffic/by-camera?limit=999999").status_code == 422
+
+    # analytics.py
+    assert client.get("/api/v1/analytics/anpr?limit=999999").status_code == 422
+    assert client.get("/api/v1/analytics/anpr/search?plate=GJ01&limit=999999").status_code == 422
+    assert client.get("/api/v1/analytics/faces?limit=999999").status_code == 422
+    assert client.get("/api/v1/analytics/events?limit=999999").status_code == 422
+
+
+def test_rate_limiter_returns_429_when_tripped(client):
+    """The in-process fixed-window limiter trips at a low threshold and
+    recovers, without leaking state into other tests (reset() before/after)
+    or throttling the exempt /health check."""
+    from app.main import rate_limiter
+
+    original_limit = rate_limiter.limit
+    rate_limiter.reset()
+    rate_limiter.limit = 3
+    try:
+        statuses = [client.get("/api/v1/analytics/overview").status_code for _ in range(6)]
+        assert 429 in statuses
+        tripped_response = client.get("/api/v1/analytics/overview")
+        assert tripped_response.status_code == 429
+        assert "Retry-After" in tripped_response.headers
+        # /health must stay exempt even while the limiter is tripped
+        assert client.get("/health").status_code == 200
+    finally:
+        rate_limiter.limit = original_limit
+        rate_limiter.reset()
+
+    # Limiter is back to normal — subsequent requests in the rest of the
+    # suite are not throttled.
+    assert client.get("/health").status_code == 200

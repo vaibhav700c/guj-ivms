@@ -1,6 +1,7 @@
 """Department management (plan §13 /departments)."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.audit import write_audit
@@ -20,14 +21,21 @@ class DepartmentCreate(BaseModel):
 
 @router.get("")
 def list_departments(db: Session = Depends(get_db)):
-    out = []
-    for d in db.query(Department).all():
-        cam_count = db.query(Camera).filter(Camera.department_id == d.id).count()
-        out.append({
+    # Single grouped COUNT instead of one COUNT query per department
+    # (previously N+1: 1 query for departments + 1 per department).
+    counts = dict(
+        db.query(Camera.department_id, func.count(Camera.id))
+        .group_by(Camera.department_id)
+        .all()
+    )
+    out = [
+        {
             "id": d.id, "name": d.name, "code": d.code,
             "description": d.description, "contact": d.contact,
-            "cameras": cam_count,
-        })
+            "cameras": counts.get(d.id, 0),
+        }
+        for d in db.query(Department).all()
+    ]
     return {"total": len(out), "items": out}
 
 

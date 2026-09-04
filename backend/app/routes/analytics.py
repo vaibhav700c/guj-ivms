@@ -1,9 +1,9 @@
 """Analytics dashboard aggregates (plan §14)."""
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.alert_engine import normalize_plate
 from app.db import get_db
@@ -86,15 +86,15 @@ def anpr_events(
     plate: str | None = None,
     vehicle_type: str | None = None,
     hours: float = 24.0,
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """ANPR detections with filters (plan §13 analytics/anpr)."""
     from datetime import datetime, timedelta, timezone
 
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    q = db.query(ANPREvent).filter(ANPREvent.timestamp >= since)
+    q = db.query(ANPREvent).options(joinedload(ANPREvent.camera)).filter(ANPREvent.timestamp >= since)
     if camera_id:
         q = q.filter(ANPREvent.camera_id == camera_id)
     if vehicle_type:
@@ -125,11 +125,12 @@ def _anpr_item(e: ANPREvent) -> dict:
 
 
 @router.get("/anpr/search")
-def anpr_search(plate: str, limit: int = 50, db: Session = Depends(get_db)):
+def anpr_search(plate: str, limit: int = Query(50, ge=1, le=500), db: Session = Depends(get_db)):
     """Search ANPR detections by plate number (plan §13 analytics/anpr/search)."""
     norm = normalize_plate(plate)
     events = (
         db.query(ANPREvent)
+        .options(joinedload(ANPREvent.camera))
         .filter(ANPREvent.plate_normalized.contains(norm))
         .order_by(ANPREvent.timestamp.desc())
         .limit(limit)
@@ -139,7 +140,7 @@ def anpr_search(plate: str, limit: int = 50, db: Session = Depends(get_db)):
 
 
 @router.get("/faces")
-def face_events(limit: int = 50, db: Session = Depends(get_db)):
+def face_events(limit: int = Query(50, ge=1, le=500), db: Session = Depends(get_db)):
     """Face detection events from Tier A cameras (plan §6 / §13 analytics/faces)."""
     from app.models import DetectionEvent
 
@@ -187,7 +188,7 @@ def traffic_density(db: Session = Depends(get_db)):
 
 
 @router.get("/events")
-def generic_events(limit: int = 100, event_type: str | None = None,
+def generic_events(limit: int = Query(100, ge=1, le=500), event_type: str | None = None,
                    db: Session = Depends(get_db)):
     """Generic detection event stream (plan §13 analytics/events)."""
     from app.models import DetectionEvent

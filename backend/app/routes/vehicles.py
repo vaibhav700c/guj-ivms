@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.alert_engine import normalize_plate
 from app.db import get_db
@@ -30,8 +30,8 @@ def _registry_query(db: Session, norm: str):
 
 @router.get("")
 def list_vehicles(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """List all VAHAN-like vehicle registry records (plan §19.2)."""
@@ -66,6 +66,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
     record = _registry_query(db, norm)
     events = (
         db.query(ANPREvent)
+        .options(joinedload(ANPREvent.camera))
         .filter(ANPREvent.plate_normalized == norm)
         .order_by(ANPREvent.timestamp.asc())
         .all()
@@ -94,6 +95,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
 
     other_events = (
         db.query(ANPREvent)
+        .options(joinedload(ANPREvent.camera))
         .filter(ANPREvent.plate_normalized != norm)
         .order_by(ANPREvent.timestamp.desc())
         .limit(500)
@@ -103,7 +105,15 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
     for e in other_events:
         if e.plate_normalized in seen_plates:
             continue
-        ratio = SequenceMatcher(None, norm, e.plate_normalized).ratio()
+        # Cheap prefilter before the O(n*m) ratio() call: real_quick_ratio()
+        # and quick_ratio() are guaranteed upper bounds on ratio() (difflib
+        # docs), so skipping candidates they've already ruled out can never
+        # drop a genuine match — it only avoids computing the expensive exact
+        # ratio for plates that are obviously too dissimilar.
+        matcher = SequenceMatcher(None, norm, e.plate_normalized)
+        if matcher.real_quick_ratio() < 0.85 or matcher.quick_ratio() < 0.85:
+            continue
+        ratio = matcher.ratio()
         if ratio >= 0.85:
             seen_plates.add(e.plate_normalized)
             cam = e.camera
@@ -232,8 +242,14 @@ def registry_lookup(plate: str, db: Session = Depends(get_db)):
 
 
 @router.get("/recent")
-def recent_detections(limit: int = Query(50, le=200), db: Session = Depends(get_db)):
-    events = db.query(ANPREvent).order_by(ANPREvent.timestamp.desc()).limit(limit).all()
+def recent_detections(limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db)):
+    events = (
+        db.query(ANPREvent)
+        .options(joinedload(ANPREvent.camera))
+        .order_by(ANPREvent.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
     return {"items": [
         {
             "id": e.id,
@@ -265,7 +281,7 @@ def traffic_by_hour(db: Session = Depends(get_db)):
 
 
 @router.get("/traffic/by-camera")
-def traffic_by_camera(limit: int = 10, db: Session = Depends(get_db)):
+def traffic_by_camera(limit: int = Query(10, ge=1, le=100), db: Session = Depends(get_db)):
     rows = (
         db.query(Camera.name, Camera.city, func.count(ANPREvent.id).label("cnt"))
         .join(ANPREvent, ANPREvent.camera_id == Camera.id)
