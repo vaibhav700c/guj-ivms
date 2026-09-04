@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { MapContainer, TileLayer, CircleMarker, Popup, Circle } from "react-leaflet";
-import { Play, Layers, Radio, Eye, AlertTriangle, X, BarChart3 } from "lucide-react";
-import { api } from "../lib/api";
+import { MapContainer, TileLayer, CircleMarker, Popup, Circle, Polyline, Marker, useMap } from "react-leaflet";
+import L from "leaflet";
+import {
+  Play, Layers, Radio, Eye, AlertTriangle, X, BarChart3,
+  Search, Route, MapPin, Clock, Pause, RotateCcw, Navigation,
+} from "lucide-react";
+import { api, formatDateTime } from "../lib/api";
 
 interface Camera {
   id: number; external_id: string; name: string; city: string | null;
@@ -20,6 +24,17 @@ interface DistrictGap {
 interface GapAnalysis {
   districts: DistrictGap[]; gap_districts: DistrictGap[]; overall_coverage_pct: number;
 }
+interface Waypoint {
+  event_id: number; camera_id: number; camera_name: string;
+  lat: number; lng: number; city: string | null;
+  timestamp: string; direction: string | null; confidence: number;
+  vehicle_type: string | null; vehicle_color: string | null; snapshot_ref?: string | null;
+}
+interface Journey {
+  plate: string; journey_start: string | null; journey_end: string | null;
+  total_cameras: number; total_distance_km: number; cities_visited: string[];
+  waypoints: Waypoint[]; probable_matches?: unknown[];
+}
 
 const STATUS_COLOR: Record<string, string> = {
   online: "#10b981", offline: "#ef4444", maintenance: "#f59e0b", unknown: "#475569",
@@ -27,6 +42,41 @@ const STATUS_COLOR: Record<string, string> = {
 const TIER_COLOR: Record<string, string> = {
   A: "#f97316", B: "#06b6d4", C: "#475569",
 };
+
+// Numbered divIcon for a route waypoint — active waypoint gets a bigger, brighter badge.
+function waypointIcon(index: number, active: boolean): L.DivIcon {
+  const size = active ? 28 : 20;
+  return L.divIcon({
+    className: "",
+    html: `<div style="
+        width:${size}px;height:${size}px;border-radius:9999px;
+        display:flex;align-items:center;justify-content:center;
+        background:${active ? "#f97316" : "#1e293b"};
+        border:2px solid ${active ? "#fdba74" : "#f97316"};
+        color:${active ? "#0b0f14" : "#f97316"};
+        font:${active ? "700 12px" : "600 10px"} ui-sans-serif,system-ui,sans-serif;
+        box-shadow:${active ? "0 0 0 4px rgba(249,115,22,0.25)" : "none"};
+      ">${index + 1}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
+
+// Pans/fits the map to the route bounds whenever the waypoint set changes.
+function FitRouteBounds({ waypoints }: { waypoints: Waypoint[] }) {
+  const map = useMap();
+  useEffect(() => {
+    if (waypoints.length === 0) return;
+    if (waypoints.length === 1) {
+      map.setView([waypoints[0].lat, waypoints[0].lng], 13);
+      return;
+    }
+    const bounds = L.latLngBounds(waypoints.map((w) => [w.lat, w.lng] as [number, number]));
+    map.fitBounds(bounds, { padding: [40, 40] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waypoints]);
+  return null;
+}
 
 export default function MapView() {
   const [cameras, setCameras] = useState<Camera[]>([]);
@@ -39,9 +89,81 @@ export default function MapView() {
   const [showGap, setShowGap] = useState(false);
   const navigate = useNavigate();
 
+  // Vehicle route replay
+  const [plateQuery, setPlateQuery] = useState("");
+  const [journey, setJourney] = useState<Journey | null>(null);
+  const [journeyLoading, setJourneyLoading] = useState(false);
+  const [journeyError, setJourneyError] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const replayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     api<{ items: Camera[] }>("/cameras?limit=500").then((r) => setCameras(r.items)).catch(() => undefined);
   }, []);
+
+  const clearRoute = () => {
+    setPlaying(false);
+    setJourney(null);
+    setJourneyError("");
+    setActiveIndex(0);
+  };
+
+  const loadJourney = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const trimmed = plateQuery.trim();
+    if (!trimmed) { setJourneyError("Enter a plate number, e.g. GJ 01 AB 1234"); return; }
+    setPlaying(false);
+    setJourney(null);
+    setActiveIndex(0);
+    setJourneyLoading(true);
+    setJourneyError("");
+    try {
+      const data = await api<Journey>(`/vehicles/journey/${encodeURIComponent(trimmed)}`);
+      setJourney(data);
+      if (!data.waypoints || data.waypoints.length === 0) {
+        setJourneyError(`No sightings recorded for ${data.plate || trimmed} yet.`);
+      }
+    } catch (err) {
+      setJourneyError(
+        err instanceof Error
+          ? `Failed to load journey — ${err.message}`
+          : "Failed to load journey. The API may be waking up (cold start can take ~20-30s) — please try again."
+      );
+    } finally {
+      setJourneyLoading(false);
+    }
+  };
+
+  // Animated replay — steps the active waypoint forward on an interval.
+  useEffect(() => {
+    if (!playing || !journey || journey.waypoints.length === 0) return undefined;
+    replayTimer.current = setInterval(() => {
+      setActiveIndex((idx) => {
+        if (idx >= journey.waypoints.length - 1) {
+          setPlaying(false);
+          return idx;
+        }
+        return idx + 1;
+      });
+    }, 1400);
+    return () => {
+      if (replayTimer.current) { clearInterval(replayTimer.current); replayTimer.current = null; }
+    };
+  }, [playing, journey]);
+
+  // Belt-and-braces cleanup on unmount, in case the effect above's cleanup didn't fire.
+  useEffect(() => () => {
+    if (replayTimer.current) { clearInterval(replayTimer.current); replayTimer.current = null; }
+  }, []);
+
+  const togglePlay = () => {
+    if (!journey || journey.waypoints.length === 0) return;
+    if (!playing && activeIndex >= journey.waypoints.length - 1) setActiveIndex(0);
+    setPlaying((p) => !p);
+  };
+
+  const hasRoute = !!journey && journey.waypoints.length > 0;
 
   const loadCoverage = () => {
     if (coveragePoints.length > 0) { setHeatmap(!heatmap); return; }
@@ -106,7 +228,68 @@ export default function MapView() {
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
 
         {/* Map */}
-        <div className="lg:col-span-3 card overflow-hidden">
+        <div className="lg:col-span-3 card overflow-hidden relative">
+
+          {/* Vehicle route replay control */}
+          <div className="absolute top-3 left-3 z-[1000] w-72 space-y-2">
+            <form onSubmit={loadJourney} className="card p-2 flex gap-1.5 shadow-lg">
+              <div className="relative flex-1">
+                <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                <input
+                  className="input pl-7 py-1.5 text-xs font-mono uppercase w-full"
+                  placeholder="Plate e.g. GJ 01 AB 1234"
+                  value={plateQuery}
+                  onChange={(e) => setPlateQuery(e.target.value)}
+                />
+              </div>
+              <button type="submit" className="btn-icon" title="Trace vehicle route" disabled={journeyLoading}>
+                <Route size={14} />
+              </button>
+            </form>
+
+            {journeyLoading && (
+              <div className="card p-2.5 text-[11px] text-slate-400 flex items-center gap-2 shadow-lg">
+                <span className="w-3 h-3 border-2 border-orange-500 border-t-transparent rounded-full animate-spin shrink-0" />
+                Loading journey… API may be cold-starting (up to ~30s).
+              </div>
+            )}
+
+            {!journeyLoading && journeyError && (
+              <div className="card p-2.5 text-[11px] text-red-400 flex items-start gap-2 shadow-lg">
+                <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                <span className="flex-1">{journeyError}</span>
+                <button onClick={clearRoute} className="text-slate-500 hover:text-white shrink-0"><X size={13} /></button>
+              </div>
+            )}
+
+            {hasRoute && journey && (
+              <div className="card p-3 space-y-2.5 shadow-lg animate-slide-in-up">
+                <div className="flex items-center justify-between">
+                  <div className="font-mono text-sm text-orange-400 font-bold">{journey.plate}</div>
+                  <button onClick={clearRoute} className="btn-icon w-6 h-6" title="Clear route">
+                    <X size={12} />
+                  </button>
+                </div>
+                <div className="text-[11px] space-y-1 text-slate-300">
+                  <div className="flex items-center gap-1.5"><Navigation size={11} className="text-orange-400" /> {journey.total_cameras} cameras · {journey.total_distance_km} km</div>
+                  <div className="flex items-center gap-1.5"><MapPin size={11} className="text-orange-400" /> {journey.cities_visited.join(" → ") || "—"}</div>
+                  <div className="flex items-center gap-1.5"><Clock size={11} className="text-orange-400" /> {formatDateTime(journey.journey_start)} → {formatDateTime(journey.journey_end)}</div>
+                </div>
+                <div className="flex items-center gap-1.5 pt-1 border-t border-control-800">
+                  <button onClick={togglePlay} className="btn-primary flex-1 justify-center text-xs py-1.5">
+                    {playing ? <Pause size={12} /> : <Play size={12} />} {playing ? "Pause" : "Replay"}
+                  </button>
+                  <button onClick={() => setActiveIndex(0)} className="btn-icon" title="Reset to start">
+                    <RotateCcw size={13} />
+                  </button>
+                </div>
+                <div className="text-[10px] font-mono text-slate-500 text-center">
+                  Waypoint {activeIndex + 1} / {journey.waypoints.length}
+                </div>
+              </div>
+            )}
+          </div>
+
           <MapContainer center={[22.6, 71.8]} zoom={7} className="h-[580px] w-full">
             <TileLayer
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -116,7 +299,7 @@ export default function MapView() {
             {coverage && cameras.map((c) => (
               <Circle key={`cov-${c.id}`} center={[c.latitude, c.longitude]}
                 radius={c.analytics_tier === "A" ? 3000 : 2000}
-                pathOptions={{ color: color(c), weight: 0, fillOpacity: 0.07 }} />
+                pathOptions={{ color: color(c), weight: 0, fillOpacity: hasRoute ? 0.03 : 0.07 }} />
             ))}
             {/* ANPR density heatmap */}
             {heatmap && coveragePoints.map((p) => (
@@ -125,17 +308,17 @@ export default function MapView() {
                 pathOptions={{
                   color: "#f97316",
                   weight: 0,
-                  fillOpacity: Math.max(0.05, (p.events / maxEvents) * 0.45),
+                  fillOpacity: Math.max(0.05, (p.events / maxEvents) * 0.45) * (hasRoute ? 0.4 : 1),
                 }} />
             ))}
-            {/* Camera markers */}
+            {/* Camera markers — dimmed while a vehicle route is active so the route reads clearly */}
             {cameras.map((c) => (
               <CircleMarker key={c.id} center={[c.latitude, c.longitude]}
-                radius={radius(c)}
+                radius={hasRoute ? Math.max(3, radius(c) - 2) : radius(c)}
                 pathOptions={{
                   color: "#000",
                   fillColor: color(c),
-                  fillOpacity: c.status === "offline" ? 0.5 : 0.9,
+                  fillOpacity: hasRoute ? 0.18 : (c.status === "offline" ? 0.5 : 0.9),
                   weight: c === selected ? 2 : 0.5,
                 }}
                 eventHandlers={{ click: () => setSelected(c) }}>
@@ -170,6 +353,38 @@ export default function MapView() {
                 </Popup>
               </CircleMarker>
             ))}
+
+            {/* Vehicle route replay layer */}
+            {hasRoute && journey && (
+              <>
+                <FitRouteBounds waypoints={journey.waypoints} />
+                <Polyline
+                  positions={journey.waypoints.map((w) => [w.lat, w.lng] as [number, number])}
+                  pathOptions={{ color: "#3b82f6", weight: 3, dashArray: "10 6", opacity: 0.85 }}
+                />
+                {/* Travelled segment, brighter, up to the active waypoint */}
+                {activeIndex > 0 && (
+                  <Polyline
+                    positions={journey.waypoints.slice(0, activeIndex + 1).map((w) => [w.lat, w.lng] as [number, number])}
+                    pathOptions={{ color: "#f97316", weight: 4, opacity: 0.95 }}
+                  />
+                )}
+                {journey.waypoints.map((w, i) => (
+                  <Marker key={w.event_id} position={[w.lat, w.lng]} icon={waypointIcon(i, i === activeIndex)}>
+                    <Popup>
+                      <div className="space-y-1 min-w-[160px]">
+                        <div className="font-bold text-sm text-white">{w.camera_name}</div>
+                        <div className="text-[11px] font-mono text-slate-400">{formatDateTime(w.timestamp)}</div>
+                        <div className="text-xs text-slate-300">
+                          {w.city ?? "—"} · dir {w.direction ?? "—"} · conf {(w.confidence * 100).toFixed(0)}%
+                        </div>
+                        <div className="text-xs text-slate-400 capitalize">{w.vehicle_type ?? "—"} · {w.vehicle_color ?? "—"}</div>
+                      </div>
+                    </Popup>
+                  </Marker>
+                ))}
+              </>
+            )}
           </MapContainer>
         </div>
 

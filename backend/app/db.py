@@ -4,14 +4,32 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
 
+def normalize_database_url(url: str) -> str:
+    """Render (and Heroku) hand out `postgres://` URLs, which SQLAlchemy 2 rejects.
+
+    Pinning the driver explicitly also stops SQLAlchemy from probing for psycopg3,
+    which is not installed.
+    """
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    return url
+
+
 connect_args = {}
+engine_kwargs: dict = {"pool_pre_ping": True}
 if settings.is_sqlite:
     connect_args = {"check_same_thread": False}
+else:
+    # Render's free Postgres allows few connections and the API runs as a single
+    # instance — keep the pool small so a burst of dashboard requests cannot
+    # exhaust it.
+    engine_kwargs |= {"pool_size": 5, "max_overflow": 5, "pool_recycle": 300}
 
 engine = create_engine(
-    settings.DATABASE_URL,
+    normalize_database_url(settings.DATABASE_URL),
     connect_args=connect_args,
-    pool_pre_ping=True,
+    **engine_kwargs,
 )
 
 if settings.is_sqlite:

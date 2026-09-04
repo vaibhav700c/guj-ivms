@@ -28,8 +28,9 @@ export function wsUrl(): string {
   return `${proto}://${window.location.host}/ws/alerts`;
 }
 
-export function snapshotUrl(ref: string | null | undefined): string | null {
-  return ref ? null : null; // snapshots live in MinIO — wire object store URL here
+export function snapshotUrl(cameraId: number | string | null | undefined): string | null {
+  if (cameraId === null || cameraId === undefined || cameraId === "") return null;
+  return `${BASE}/api/v1/feeds/${cameraId}/snapshot`;
 }
 
 export function formatTime(iso: string | null | undefined): string {

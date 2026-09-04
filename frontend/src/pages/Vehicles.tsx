@@ -1,7 +1,126 @@
-import { useState } from "react";
-import { Search, Route, MapPin, Clock, Gauge, Car } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Search, Route, MapPin, Clock, Gauge, Car, Camera as CameraIcon, ImageOff, ShieldQuestion } from "lucide-react";
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup } from "react-leaflet";
-import { api, formatDateTime } from "../lib/api";
+import { api, formatDateTime, snapshotUrl } from "../lib/api";
+
+// ── Snapshot thumbnails: lazy, capped-concurrency, never a broken-image icon ──
+// The /feeds/{id}/snapshot endpoint is slow, rate-limited (1 real capture per
+// camera per 8s server-side) and frequently fails upstream (502/503/504) until
+// Sentinel CDN credentials are configured. So we only ever request it once a
+// thumbnail scrolls into view, cap how many load at once, and fall back to a
+// neutral placeholder on any error — never a browser broken-image icon.
+const MAX_CONCURRENT_SNAPSHOTS = 3;
+let activeSnapshotLoads = 0;
+const snapshotWaiters: (() => void)[] = [];
+
+function acquireSnapshotSlot(): Promise<() => void> {
+  return new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (activeSnapshotLoads < MAX_CONCURRENT_SNAPSHOTS) {
+        activeSnapshotLoads++;
+        let released = false;
+        resolve(() => {
+          if (released) return;
+          released = true;
+          activeSnapshotLoads--;
+          const next = snapshotWaiters.shift();
+          if (next) next();
+        });
+      } else {
+        snapshotWaiters.push(tryAcquire);
+      }
+    };
+    tryAcquire();
+  });
+}
+
+function SnapshotThumb({ cameraId, className }: { cameraId: number; className?: string }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const releaseRef = useRef<(() => void) | null>(null);
+  const [visible, setVisible] = useState(false);
+  const [src, setSrc] = useState<string | null>(null);
+  const [status, setStatus] = useState<"pending" | "loading" | "ready" | "error">("pending");
+
+  // Only start trying once the thumbnail is actually scrolled near the viewport.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisible(true);
+          obs.disconnect();
+        }
+      },
+      { rootMargin: "150px" }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    const url = snapshotUrl(cameraId);
+    if (!url) {
+      setStatus("error");
+      return;
+    }
+    let cancelled = false;
+    setStatus("loading");
+    acquireSnapshotSlot().then((release) => {
+      if (cancelled) {
+        release();
+        return;
+      }
+      releaseRef.current = release;
+      setSrc(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, cameraId]);
+
+  const finish = (ok: boolean) => {
+    setStatus(ok ? "ready" : "error");
+    releaseRef.current?.();
+    releaseRef.current = null;
+  };
+
+  return (
+    <div
+      ref={hostRef}
+      className={`relative shrink-0 overflow-hidden rounded-lg bg-control-850 border border-control-800/60 ${className ?? "w-14 h-10"}`}
+      title={status === "error" ? "No frame available" : "Live camera snapshot"}
+    >
+      {src && status !== "error" && (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          className={`w-full h-full object-cover transition-opacity ${status === "ready" ? "opacity-100" : "opacity-0"}`}
+          onLoad={() => finish(true)}
+          onError={() => finish(false)}
+        />
+      )}
+      {status === "loading" && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="w-3 h-3 rounded-full border-2 border-slate-600 border-t-orange-500 animate-spin" />
+        </div>
+      )}
+      {(status === "pending" || status === "error") && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-0.5 text-slate-700">
+          {status === "error" ? <ImageOff size={13} /> : <CameraIcon size={13} />}
+          {status === "error" && <span className="text-[8px] text-slate-600 leading-none">no frame</span>}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface Journey {
   plate: string;
@@ -28,6 +147,16 @@ interface Journey {
     distance_km: number;
     elapsed_min: number;
     avg_speed_kmph: number | null;
+  }[];
+  probable_matches?: {
+    plate_text: string;
+    similarity: number;
+    camera_name: string | null;
+    lat: number | null;
+    lng: number | null;
+    city: string | null;
+    timestamp: string;
+    confidence: number;
   }[];
 }
 
@@ -151,7 +280,8 @@ export default function Vehicles() {
                     }}
                   >
                     <Popup>
-                      <div className="text-xs">
+                      <div className="text-xs space-y-1.5">
+                        <SnapshotThumb cameraId={s.camera_id} className="w-40 h-24" />
                         <div className="font-semibold">{s.camera_name}</div>
                         <div className="font-mono text-[10px]">{formatDateTime(s.timestamp)}</div>
                         <div>dir: {s.direction ?? "—"} · conf {(s.confidence * 100).toFixed(0)}%</div>
@@ -178,6 +308,7 @@ export default function Vehicles() {
                 <div key={s.event_id}
                   className={`px-4 py-2.5 flex items-center gap-3 ${i < step ? "" : "opacity-50"}`}>
                   <div className={`w-2.5 h-2.5 rounded-full ${i < step ? "bg-orange-500" : "bg-control-700"}`} />
+                  <SnapshotThumb cameraId={s.camera_id} className="w-14 h-10" />
                   <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(s.timestamp)}</div>
                   <div className="flex-1 text-sm text-slate-300">{s.camera_name}</div>
                   <div className="text-xs text-slate-500 capitalize">{s.vehicle_type} · {s.direction}</div>
@@ -186,6 +317,32 @@ export default function Vehicles() {
               ))}
             </div>
           </div>
+
+          {/* Probable matches (ReID cross-camera, unconfirmed) — plan §20.2 step 5 */}
+          {journey.probable_matches && journey.probable_matches.length > 0 && (
+            <div className="card lg:col-span-5 border-amber-500/20">
+              <div className="card-header text-sm font-semibold flex items-center gap-2 text-amber-400">
+                <ShieldQuestion size={14} />
+                Probable Matches — Unconfirmed (vehicle ReID, ANPR could not read plate)
+              </div>
+              <div className="divide-y divide-control-800/60 max-h-64 overflow-y-auto">
+                {journey.probable_matches.map((m, i) => (
+                  <div key={i} className="px-4 py-2.5 flex items-center gap-3 bg-amber-500/[0.03]">
+                    <div className="w-2.5 h-2.5 rounded-full bg-amber-500/70 shrink-0" />
+                    <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(m.timestamp)}</div>
+                    <div className="flex-1 text-sm text-slate-300">
+                      <span className="font-mono text-amber-300">{m.plate_text}</span>
+                      <span className="text-slate-500"> · {m.camera_name ?? "—"}</span>
+                      {m.city && <span className="text-slate-600"> ({m.city})</span>}
+                    </div>
+                    <div className="badge bg-amber-500/15 text-amber-400 border border-amber-500/25">
+                      {(m.similarity * 100).toFixed(0)}% similarity
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
