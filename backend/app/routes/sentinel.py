@@ -89,10 +89,24 @@ async def _get_sentinel_cookie() -> str:
 
 
 # Cloudflare rate-limits by source IP, and this backend is a single IP serving
-# every viewer. A 9-tile grid firing nine cold playlist fetches at once is
-# enough to get most of them 403'd, so upstream concurrency is capped and
-# identical concurrent fetches are coalesced into one.
-_UPSTREAM_CONCURRENCY = 2
+# every viewer, so upstream concurrency is capped and identical concurrent
+# fetches are coalesced into one. This was originally 2, sized against
+# Cloudflare 403s — but measured directly against production (Playwright +
+# network-log capture, 3x3 grid, 9 distinct cold cameras): a width of 2 makes
+# every fetch beyond the first 2 queue long enough to blow hls.js's ~20s
+# manifest-load timeout outright (ERR_ABORTED, not 403), and the resulting
+# retries pile back onto the same 2-wide gate, compounding the backlog. This
+# is exactly the "buffers forever, deselecting one camera unsticks the rest"
+# symptom — removing a tile removes one queued cold-fetch, letting the
+# remaining ones land inside the client's patience window.
+#
+# _PLAYLIST_TTL (60s) and _SEGMENT_CACHE_MAX (200) now absorb essentially all
+# *repeat* load without touching Cloudflare at all — the residual 403 risk
+# this gate still needs to bound is only genuinely new distinct cameras
+# cold-starting in the same few seconds, which a 3x3/4x4 grid produces at
+# most 9-16 of. 6 is wide enough to clear that queue inside hls.js's timeout
+# while still well short of "fire everything at once."
+_UPSTREAM_CONCURRENCY = 6
 _upstream_gate: asyncio.Semaphore | None = None
 _inflight: dict[str, asyncio.Task] = {}
 
