@@ -13,6 +13,7 @@ import Watchlist from "./pages/Watchlist";
 import Analytics from "./pages/Analytics";
 import AnprDetections from "./pages/AnprDetections";
 import Investigate from "./pages/Investigate";
+import Detections from "./pages/Detections";
 import { useAuth } from "./store/auth";
 import { api } from "./lib/api";
 
@@ -57,6 +58,7 @@ export default function App() {
         <Route path="alerts" element={<Alerts />} />
         <Route path="watchlist" element={<Watchlist />} />
         <Route path="investigate" element={<Investigate />} />
+        <Route path="detections" element={<Detections />} />
         <Route path="analytics" element={<Analytics />} />
         <Route path="anpr" element={<AnprDetections />} />
       </Route>

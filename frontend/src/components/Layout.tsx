@@ -3,6 +3,7 @@ import {
   LayoutDashboard, Video, MonitorPlay, Map as MapIcon,
   Car, Siren, ListChecks, BarChart3, ShieldCheck, LogOut,
   Bell, BellOff, WifiOff, ChevronRight, ScanLine, Loader2, UserSearch,
+  BoxSelect,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../store/auth";
@@ -17,6 +18,7 @@ const NAV = [
   { to: "/vehicles",  label: "Vehicle Search",  icon: Car },
   { to: "/alerts",    label: "Live Alerts",     icon: Siren },
   { to: "/anpr",      label: "ANPR Detections", icon: ScanLine },
+  { to: "/detections", label: "Detection Viewer", icon: BoxSelect },
   { to: "/watchlist", label: "Watchlist",        icon: ListChecks },
   { to: "/investigate", label: "Investigate",    icon: UserSearch },
   { to: "/analytics", label: "Analytics",        icon: BarChart3 },
