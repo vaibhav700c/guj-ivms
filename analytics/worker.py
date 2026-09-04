@@ -399,7 +399,17 @@ class Models:
             from insightface.app import FaceAnalysis
 
             app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-            app.prepare(ctx_id=-1, det_size=(640, 640))
+            # 640x640 (plan §6.1's own reference value) measured live against
+            # the real Sentinel Grid: on a genuine live frame from cam04 with
+            # real pedestrians clearly visible, it found ZERO faces — the
+            # people are simply too small once a 1920x1080 wide-intersection
+            # frame is downscaled to 640. The exact same real frame, run
+            # through SCRFD at det_size=(1280,1280), found 2 real faces at
+            # legitimate confidence (0.67, 0.59) — the faces are genuinely
+            # present, the detector just needed higher input resolution to
+            # resolve them. The edge worker runs on a full local machine (not
+            # the 512MB Render backend), so the extra compute is affordable.
+            app.prepare(ctx_id=-1, det_size=(1280, 1280))
             self.face_app = app
             log.info("InsightFace buffalo_l loaded — face recognition enabled")
         except Exception:

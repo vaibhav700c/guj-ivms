@@ -186,10 +186,10 @@ async def enroll_photo(
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     faces = worker.MODELS.face_app.get(rgb)
     if not faces and max(img.shape[:2]) < 480:
-        # The live pipeline's det_size=(640,640) is tuned for full CCTV frames
-        # and misses faces in smaller reference photos (e.g. a cropped ID
-        # photo) — upscale once and retry rather than forcing every camera
-        # frame through a smaller, slower, less accurate detector size.
+        # The live pipeline's det_size (worker.py, now 1280x1280) still
+        # expects roughly CCTV-frame-sized input; a small reference photo
+        # (e.g. a cropped ID photo) benefits from being upscaled toward that
+        # scale first rather than run through the detector tiny.
         scale = 480 / max(img.shape[:2])
         upscaled = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         faces = worker.MODELS.face_app.get(upscaled)
