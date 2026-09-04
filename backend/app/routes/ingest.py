@@ -38,6 +38,7 @@ class ANPRIngest(BaseModel):
     lane: int | None = None
     snapshot_ref: str | None = None
     evidence_image: str | None = None  # base64 JPEG, the real detection frame
+    appearance_signature: list[float] | None = None  # HSV histogram, cross-camera ReID (plan §7.2)
     timestamp: datetime | None = None
 
 
@@ -68,6 +69,7 @@ async def ingest_anpr(payload: ANPRIngest, db: Session = Depends(get_db),
         lane=payload.lane,
         snapshot_ref=payload.snapshot_ref,
         evidence_image_b64=payload.evidence_image,
+        embedding={"appearance": payload.appearance_signature} if payload.appearance_signature else {},
         timestamp=payload.timestamp or datetime.now(timezone.utc),
     )
     db.add(event)

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.alert_engine import normalize_plate
 from app.db import get_db
-from app.models import ANPREvent, Camera, VehicleRecord
+from app.models import ANPREvent, Camera, DetectionEvent, VehicleRecord
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
 
@@ -21,6 +21,82 @@ def haversine_km(lat1, lng1, lat2, lng2):
     dp, dl = math.radians(lat2 - lat1), math.radians(lng2 - lng1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * r * math.asin(math.sqrt(a))
+
+
+def _hist_similarity(a: list[float], b: list[float]) -> float:
+    """Histogram intersection of two L1-normalized HSV histograms — 1.0 =
+    identical color distribution, 0.0 = disjoint. Pure Python (no numpy/cv2
+    dependency on the backend, unlike the edge worker that computes these)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return sum(min(x, y) for x, y in zip(a, b))
+
+
+REID_TIME_WINDOW_MIN = 45
+REID_SIMILARITY_THRESHOLD = 0.85
+
+
+def _appearance_probable_matches(db: Session, sightings: list[dict]) -> list[dict]:
+    """Cross-camera vehicle matching for cameras that cannot read a plate at
+    all (plan §7.2 Method 2 / Key Differentiator #3). For each confirmed ANPR
+    sighting that carries an appearance signature (see
+    analytics/worker.py::vehicle_appearance_signature), look for vehicle
+    DetectionEvents on OTHER cameras within a plausible time window whose
+    appearance histogram is a close match — these are cameras where the
+    plate genuinely could not be read, so this is the only correlation
+    signal available, same idea as plan's ReID/time-distance fallback.
+    """
+    from datetime import timedelta
+
+    results = []
+    seen: set[tuple[int, str]] = set()
+    for s in sightings:
+        sig = s.get("appearance_signature")
+        if not sig:
+            continue
+        try:
+            ts = datetime.fromisoformat(s["timestamp"])
+        except Exception:
+            continue
+        window_start = ts - timedelta(minutes=REID_TIME_WINDOW_MIN)
+        window_end = ts + timedelta(minutes=REID_TIME_WINDOW_MIN)
+        candidates = (
+            db.query(DetectionEvent)
+            .filter(
+                DetectionEvent.event_type == "vehicle",
+                DetectionEvent.camera_id != s["camera_id"],
+                DetectionEvent.timestamp >= window_start,
+                DetectionEvent.timestamp <= window_end,
+            )
+            .order_by(DetectionEvent.timestamp.desc())
+            .limit(300)
+            .all()
+        )
+        for c in candidates:
+            csig = (c.metadata_json or {}).get("appearance_signature")
+            if not csig:
+                continue
+            key = (c.camera_id, c.timestamp.isoformat())
+            if key in seen:
+                continue
+            similarity = _hist_similarity(sig, csig)
+            if similarity >= REID_SIMILARITY_THRESHOLD:
+                seen.add(key)
+                cam = db.get(Camera, c.camera_id)
+                results.append({
+                    "camera_id": c.camera_id,
+                    "camera_name": cam.name if cam else None,
+                    "lat": cam.latitude if cam else None,
+                    "lng": cam.longitude if cam else None,
+                    "city": cam.city if cam else None,
+                    "timestamp": c.timestamp.isoformat(),
+                    "similarity": round(similarity, 3),
+                    "matched_from_camera": s["camera_name"],
+                    "matched_from_timestamp": s["timestamp"],
+                    "method": "appearance_reid",
+                })
+    results.sort(key=lambda r: r["similarity"], reverse=True)
+    return results[:20]
 
 
 def _registry_query(db: Session, norm: str):
@@ -91,6 +167,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
             "vehicle_color": e.vehicle_color,
             "snapshot_ref": e.snapshot_ref,
             "has_evidence_image": bool(e.evidence_image_b64),
+            "appearance_signature": (e.embedding or {}).get("appearance"),
         })
 
     # Probable (OCR-tolerant) matches — plan §20.2 step 5 (ReID/fuzzy fallback)
@@ -154,6 +231,10 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
             "avg_speed_kmph": round(speed, 1) if speed and speed < 160 else None,
         })
 
+    reid_matches = _appearance_probable_matches(db, sightings)
+    for s in sightings:
+        s.pop("appearance_signature", None)  # internal-only, not for the API response
+
     cities = list(dict.fromkeys(s["city"] for s in sightings if s["city"]))
     return {
         "plate": plate,
@@ -175,6 +256,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
         "cities_visited": cities,
         "sightings": sightings,
         "probable_matches": probable,
+        "probable_reid_matches": reid_matches,
         "legs": legs,
     }
 

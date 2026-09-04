@@ -309,6 +309,38 @@ def encode_evidence_b64(frame: np.ndarray) -> str | None:
         return None
 
 
+APPEARANCE_HIST_BINS = (8, 8, 8)  # H, S, V
+
+
+def vehicle_appearance_signature(frame: np.ndarray, bbox_xyxy) -> list[float] | None:
+    """Cheap, real cross-camera vehicle appearance signature (plan §7.2
+    Method 2 / "Key Differentiator #3: Multi-Strategy Vehicle Matching") for
+    cameras that cannot read a plate at all (Tier B/C — see
+    CAMERA_CAPABILITY_NOTES). Plan §23 spec'd OSNet/Torchreid for this, but
+    that pulls another ~200MB dependency and a second heavy model onto a
+    machine already running YOLOv8+InsightFace+plate-OCR; a normalized HSV
+    color histogram of the vehicle crop is a genuine, real appearance
+    signature — cheap enough to compute on every tracked vehicle — that
+    correctly captures "same white hatchback vs. same black SUV" for the
+    demo's actual need (narrowing candidates when ANPR is unavailable), even
+    though it is weaker than a learned ReID embedding for near-identical
+    vehicles of the same color/model.
+    """
+    try:
+        x1, y1, x2, y2 = [max(0, int(v)) for v in bbox_xyxy]
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10:
+            return None
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1, 2], None, list(APPEARANCE_HIST_BINS),
+                             [0, 180, 0, 256, 0, 256])
+        cv2.normalize(hist, hist, alpha=1.0, norm_type=cv2.NORM_L1)
+        return [round(float(v), 5) for v in hist.flatten()]
+    except Exception:
+        log.exception("appearance signature failed")
+        return None
+
+
 # ── Model loading (graceful degradation per module) ──────────────────────────
 
 class Models:
@@ -401,7 +433,8 @@ class Ingest:
     def anpr(self, camera_id: int, plate_text: str, confidence: float,
              ocr_confidence: float | None = None, vehicle_type: str | None = None,
              vehicle_color: str | None = None, ts_ms: float | None = None,
-             snapshot_ref: str | None = None, evidence_image: str | None = None) -> dict | None:
+             snapshot_ref: str | None = None, evidence_image: str | None = None,
+             appearance_signature: list[float] | None = None) -> dict | None:
         payload = {
             "camera_id": camera_id,
             "plate_text": plate_text,
@@ -411,6 +444,7 @@ class Ingest:
             "vehicle_color": vehicle_color,
             "snapshot_ref": snapshot_ref,
             "evidence_image": evidence_image,
+            "appearance_signature": appearance_signature,
             "source": "edge-yolo",
         }
         if ts_ms:
@@ -642,8 +676,10 @@ class CameraPipeline(threading.Thread):
         return {"x": round(x1), "y": round(y1),
                 "w": round(x2 - x1), "h": round(y2 - y1)}
 
-    def _vehicle_type_at(self, plate_box, detections) -> str | None:
-        """Assign the vehicle class whose box best contains the plate centre.
+    def _vehicle_match_at(self, plate_box, detections):
+        """Find the vehicle detection (class + full bbox) whose box best
+        contains the plate centre — used both for vehicle_type and for
+        cropping the whole vehicle to compute an appearance signature.
 
         Indexes the parallel arrays rather than iterating: `sv.Detections`
         yields plain tuples when iterated, not per-detection objects.
@@ -652,7 +688,7 @@ class CameraPipeline(threading.Thread):
             return None
         px, py, pw, ph = plate_box
         pcx, pcy = px + pw / 2, py + ph / 2
-        best, best_area = None, 0.0
+        best_cls, best_bbox, best_area = None, None, 0.0
         class_ids = getattr(detections, "class_id", None)
         if class_ids is None:
             return None
@@ -664,8 +700,10 @@ class CameraPipeline(threading.Thread):
             if x1 <= pcx <= x2 and y1 <= pcy <= y2:
                 area = (x2 - x1) * (y2 - y1)
                 if area > best_area:
-                    best_area, best = area, cls
-        return VEHICLE_TYPE_BY_CLASS.get(best)
+                    best_area, best_cls, best_bbox = area, cls, (x1, y1, x2, y2)
+        if best_cls is None:
+            return None
+        return VEHICLE_TYPE_BY_CLASS.get(best_cls), best_bbox
 
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
                           conf: float, ocr_conf: float, plate_box,
@@ -692,15 +730,22 @@ class CameraPipeline(threading.Thread):
         self.anpr_stats["pushed"] += 1
         snap = save_snapshot(self.camera_id, frame) if frame is not None else None
         evidence = encode_evidence_b64(frame) if frame is not None else None
+        match = self._vehicle_match_at(plate_box, detections)
+        vehicle_type, vehicle_bbox = match if match else (None, None)
+        appearance = (
+            vehicle_appearance_signature(frame, vehicle_bbox)
+            if frame is not None and vehicle_bbox is not None else None
+        )
         result = self.ingest.anpr(
             camera_id=self.camera_id,
             plate_text=voted_text,
             confidence=best_det_conf,
             ocr_confidence=best_ocr_conf,
-            vehicle_type=self._vehicle_type_at(plate_box, detections),
+            vehicle_type=vehicle_type,
             ts_ms=frame_ts,
             snapshot_ref=snap,
             evidence_image=evidence,
+            appearance_signature=appearance,
         )
         tier = "HIGH" if best_ocr_conf >= PLATE_CONF_HIGH else "LOW-CONF"
         if result:
@@ -708,11 +753,17 @@ class CameraPipeline(threading.Thread):
                      external_id(self.camera_id), voted_text, tier,
                      best_ocr_conf, result.get("status"))
 
-    def _push_tracks(self, detections) -> None:
+    def _push_tracks(self, detections, frame: np.ndarray | None = None) -> None:
         """Push one metadata event per tracked vehicle/person, rate-limited.
 
         Indexes the parallel arrays rather than iterating: `sv.Detections`
         yields plain tuples when iterated, not per-detection objects.
+
+        Vehicle events on a plate_readable=False camera (see the capability
+        audit in seed_data.py) carry an appearance signature — this is the
+        only signal available to correlate that vehicle with a plate-
+        confirmed sighting elsewhere (plan §7.2 Method 2 / cross-camera ReID)
+        since ANPR is already known to be futile here.
         """
         if detections is None or len(detections) == 0:
             return
@@ -731,12 +782,18 @@ class CameraPipeline(threading.Thread):
             if now - self._last_track_push.get(key, 0) < PUSH_DETECTION_EVERY_S:
                 continue
             self._last_track_push[key] = now
+            metadata: dict = {}
+            if cls in VEHICLE_CLASSES and frame is not None and not self.plate_readable:
+                sig = vehicle_appearance_signature(frame, detections.xyxy[i])
+                if sig:
+                    metadata["appearance_signature"] = sig
             self.ingest.detection(
                 camera_id=self.camera_id,
                 event_type="person" if cls in PERSON_CLASSES else "vehicle",
                 confidence=float(confidences[i]) if confidences is not None else 0.0,
                 bbox=self._xyxy_to_bbox(detections.xyxy[i]),
                 track_id=f"trk-{track_id}" if track_id is not None else None,
+                metadata=metadata,
             )
 
     def _face_pass(self, frame: np.ndarray) -> None:
@@ -817,7 +874,7 @@ class CameraPipeline(threading.Thread):
             if self.tracker is not None and len(detections) > 0:
                 detections = self.tracker.update_with_detections(detections)
             if len(detections) > 0:
-                self._push_tracks(detections)
+                self._push_tracks(detections, frame=frame)
 
         # 2) ANPR — plate localization (YOLO) + OCR (fast-plate-ocr), plan §5
         if self.models.plate_det and self.models.plate_ocr and self.plate_readable:

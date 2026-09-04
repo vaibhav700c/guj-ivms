@@ -158,6 +158,17 @@ interface Journey {
     timestamp: string;
     confidence: number;
   }[];
+  probable_reid_matches?: {
+    camera_id: number;
+    camera_name: string | null;
+    lat: number | null;
+    lng: number | null;
+    city: string | null;
+    timestamp: string;
+    similarity: number;
+    matched_from_camera: string | null;
+    matched_from_timestamp: string;
+  }[];
 }
 
 const DEFAULT_CENTER: [number, number] = [22.6, 71.6];
@@ -318,12 +329,12 @@ export default function Vehicles() {
             </div>
           </div>
 
-          {/* Probable matches (ReID cross-camera, unconfirmed) — plan §20.2 step 5 */}
+          {/* Probable matches — OCR-tolerant fuzzy plate text, plan §20.2 step 5 */}
           {journey.probable_matches && journey.probable_matches.length > 0 && (
             <div className="card lg:col-span-5 border-amber-500/20">
               <div className="card-header text-sm font-semibold flex items-center gap-2 text-amber-400">
                 <ShieldQuestion size={14} />
-                Probable Matches — Unconfirmed (vehicle ReID, ANPR could not read plate)
+                Probable Matches — Unconfirmed (similar plate text, possible OCR misread)
               </div>
               <div className="divide-y divide-control-800/60 max-h-64 overflow-y-auto">
                 {journey.probable_matches.map((m, i) => (
@@ -337,6 +348,37 @@ export default function Vehicles() {
                     </div>
                     <div className="badge bg-amber-500/15 text-amber-400 border border-amber-500/25">
                       {(m.similarity * 100).toFixed(0)}% similarity
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Real cross-camera vehicle ReID — plan §7.2 Method 2 / Key Differentiator #3.
+              For cameras where ANPR is known to be impossible (see the capability
+              audit — plate_readable: false), appearance (HSV color histogram) is the
+              only correlation signal available. */}
+          {journey.probable_reid_matches && journey.probable_reid_matches.length > 0 && (
+            <div className="card lg:col-span-5 border-cyan-500/20">
+              <div className="card-header text-sm font-semibold flex items-center gap-2 text-cyan-400">
+                <ShieldQuestion size={14} />
+                Probable Matches — Unconfirmed (appearance ReID, camera cannot read plates)
+              </div>
+              <div className="divide-y divide-control-800/60 max-h-64 overflow-y-auto">
+                {journey.probable_reid_matches.map((m, i) => (
+                  <div key={i} className="px-4 py-2.5 flex items-center gap-3 bg-cyan-500/[0.03]">
+                    <div className="w-2.5 h-2.5 rounded-full bg-cyan-500/70 shrink-0" />
+                    <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(m.timestamp)}</div>
+                    <div className="flex-1 text-sm text-slate-300">
+                      <span className="text-slate-500">{m.camera_name ?? "—"}</span>
+                      {m.city && <span className="text-slate-600"> ({m.city})</span>}
+                      <span className="text-[10px] text-slate-600 block">
+                        matched from {m.matched_from_camera ?? "—"} at {formatDateTime(m.matched_from_timestamp)}
+                      </span>
+                    </div>
+                    <div className="badge bg-cyan-500/15 text-cyan-400 border border-cyan-500/25">
+                      {(m.similarity * 100).toFixed(0)}% appearance match
                     </div>
                   </div>
                 ))}
