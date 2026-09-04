@@ -104,9 +104,12 @@ async def _get_sentinel_cookie() -> str:
 # *repeat* load without touching Cloudflare at all — the residual 403 risk
 # this gate still needs to bound is only genuinely new distinct cameras
 # cold-starting in the same few seconds, which a 3x3/4x4 grid produces at
-# most 9-16 of. 6 is wide enough to clear that queue inside hls.js's timeout
-# while still well short of "fire everything at once."
-_UPSTREAM_CONCURRENCY = 6
+# most 9-16 of. Widening this (a fresh httpx.AsyncClient per request, i.e.
+# NOT connection-reuse/pooling — that was tried and produced widespread 403s,
+# see the git revert right after this line's previous version) is safe against
+# Cloudflare up to at least 6, measured with zero 403s; 9 exactly clears a
+# 3x3 grid with no queueing at all.
+_UPSTREAM_CONCURRENCY = 9
 _upstream_gate: asyncio.Semaphore | None = None
 _inflight: dict[str, asyncio.Task] = {}
 
