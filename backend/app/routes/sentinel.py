@@ -195,38 +195,98 @@ async def refresh_auth():
         return {"status": "error", "message": str(exc)}
 
 
+def _parse_upstream_playlist(cam_id: str, content: str) -> tuple[list[tuple[float, str]], str | None]:
+    """Pull (duration, segment_filename) pairs and the key URI out of the
+    upstream playlist. The upstream is EXT-X-PLAYLIST-TYPE:VOD covering the
+    *entire* loop (thousands of segments, ~400KB) — see below for why we
+    don't just proxy that shape through as-is."""
+    segments: list[tuple[float, str]] = []
+    key_uri: str | None = None
+    pending_dur: float | None = None
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#EXT-X-KEY") and 'URI="' in line:
+            m = re.search(r'URI="([^"]+)"', line)
+            if m:
+                key_uri = m.group(1)
+        elif line.startswith("#EXTINF:"):
+            try:
+                pending_dur = float(line[len("#EXTINF:"):].rstrip(",").split(",")[0])
+            except ValueError:
+                pending_dur = None
+        elif not line.startswith("#"):
+            seg = line.split("/")[-1].split("?")[0]
+            segments.append((pending_dur or 6.0, seg))
+            pending_dur = None
+    return segments, key_uri
+
+
+# integration.txt is explicit: "Every camera is published as a live stream...
+# there is no seeking and no way to run ahead of real time" and "Each feed
+# loops; at the loop point the scene cuts abruptly." But the upstream HLS
+# playlist is EXT-X-PLAYLIST-TYPE:VOD with a fixed MEDIA-SEQUENCE:0 covering
+# the *whole* loop — i.e. it is not actually a live/sliding manifest at all,
+# it is a static listing of one full loop cycle. Proxying that shape through
+# unchanged means hls.js always starts at segment 0 on every page load, so
+# refreshing the grid always "restarts the video from the beginning" instead
+# of joining wherever the loop actually is right now — which is exactly what
+# was reported. Fixed by presenting a genuine small *live* sliding window
+# instead: track a per-camera reference epoch, compute how far into the loop
+# "now" is, and only ever hand hls.js a few segments starting there — with a
+# monotonically increasing MEDIA-SEQUENCE so it reloads and advances like a
+# real live stream, and an EXT-X-DISCONTINUITY tag exactly at the loop
+# wrap-around point (the "scene cuts abruptly" moment) so the player expects
+# it instead of treating it as an error.
+_loop_epoch: dict[str, float] = {}
+_LIVE_WINDOW_SEGMENTS = 6
+
+
 @router.get("/hls/{cam_id}/index.m3u8")
 async def hls_playlist(cam_id: str, request: Request):
     cam_id = cam_id.lower()
+    now = time.time()
 
     cached = _playlist_cache.get(cam_id)
-    if cached and (time.time() - cached[0]) < _PLAYLIST_TTL:
-        return _playlist_response(cached[1])
+    if cached and (now - cached[0]) < _PLAYLIST_TTL:
+        segments, key_uri = cached[1]
+    else:
+        upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
+        resp = await _upstream_get(upstream_url, timeout=20)
+        segments, key_uri = _parse_upstream_playlist(cam_id, resp.text)
+        _playlist_cache[cam_id] = (now, (segments, key_uri))
 
-    upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
-    resp = await _upstream_get(upstream_url, timeout=20)
+    if not segments:
+        raise HTTPException(502, "Upstream playlist had no segments")
 
-    content = resp.text
+    epoch = _loop_epoch.setdefault(cam_id, now)
+    avg_dur = sum(d for d, _ in segments) / len(segments)
+    global_seq = int((now - epoch) / avg_dur)
+    start_idx = global_seq % len(segments)
+    window = [segments[(start_idx + i) % len(segments)] for i in range(_LIVE_WINDOW_SEGMENTS)]
+    target_duration = max(int(d) for d, _ in window) + 1
 
-    def rewrite_line(line: str) -> str:
-        stripped = line.strip()
-        if not stripped:
-            return line
-        if stripped.startswith("#EXT-X-KEY") and 'URI="' in stripped:
-            def _rewrite_uri(m):
-                uri = m.group(1)
-                if uri.startswith("/") or not uri.startswith("http"):
-                    return f'URI="/api/v1/sentinel/hls/{cam_id}/enc.key"'
-                return m.group(0)
-            return re.sub(r'URI="([^"]+)"', _rewrite_uri, stripped)
-        if not stripped.startswith("#"):
-            seg = stripped.split("/")[-1].split("?")[0]
-            return f"/api/v1/sentinel/hls/{cam_id}/{seg}"
-        return line
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:6",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        f"#EXT-X-MEDIA-SEQUENCE:{global_seq}",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+    ]
+    if key_uri:
+        lines.append(f'#EXT-X-KEY:METHOD=AES-128,URI="/api/v1/sentinel/hls/{cam_id}/enc.key",IV=0x00000000000000000000000000000000')
+    window_indices = [(start_idx + i) % len(segments) for i in range(_LIVE_WINDOW_SEGMENTS)]
+    for i, (dur, seg) in enumerate(window):
+        # The list is circular (the feed loops); a wrap from the last
+        # segment back to index 0 is the real "scene cuts abruptly" moment
+        # integration.txt describes — flag it so the player expects it.
+        if i > 0 and window_indices[i] < window_indices[i - 1]:
+            lines.append("#EXT-X-DISCONTINUITY")
+        lines.append(f"#EXTINF:{dur:.3f},")
+        lines.append(f"/api/v1/sentinel/hls/{cam_id}/{seg}")
 
-    rewritten = "\n".join(rewrite_line(l) for l in content.splitlines())
-    _playlist_cache[cam_id] = (time.time(), rewritten)
-    return _playlist_response(rewritten)
+    return _playlist_response("\n".join(lines) + "\n")
 
 
 def _playlist_response(body: str) -> Response:
@@ -249,16 +309,14 @@ _ENC_KEY_TTL = 3600.0
 # upstream fetch.
 #
 # Segments are safe to cache indefinitely: the playlist is EXT-X-PLAYLIST-TYPE
-# VOD over a looping feed, so seg00042.ts is always identical. The playlist
-# itself is a full VOD listing of the entire loop (~400KB, thousands of
-# segments), not a small live-window manifest — measured at ~25-30s to
-# re-fetch from the Cloudflare-fronted CDN under load. A short TTL was
-# forcing that expensive re-fetch on every viewer every few seconds, which
-# starved the upstream concurrency gate and stalled segment delivery behind
-# it (segments only play for ~6s each; a queued cold fetch behind a 27s
-# playlist re-fetch guarantees a stall). The playlist barely changes, so a
-# much longer TTL removes that cost with no real staleness risk.
-_playlist_cache: dict[str, tuple[float, str]] = {}
+# VOD over a looping feed, so seg00042.ts is always identical. This cache
+# holds the *parsed* upstream segment list (list[(duration, filename)],
+# key_uri) rather than final rewritten text, because the playlist we actually
+# serve to hls.js is now a small computed live-window slice of it (see
+# hls_playlist) that changes every request — only the underlying upstream
+# fetch (~400KB, thousands of segments, measured at ~25-30s under load
+# against the Cloudflare-fronted CDN) is expensive enough to need caching.
+_playlist_cache: dict[str, tuple[float, tuple[list[tuple[float, str]], str | None]]] = {}
 _PLAYLIST_TTL = 60.0
 
 _segment_cache: "OrderedDict[str, bytes]" = OrderedDict()
