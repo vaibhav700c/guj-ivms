@@ -212,7 +212,22 @@ function StreamTile({ camera, big, clock, onExpand, proxyUrl, startDelayMs = 0 }
       setState("loading");
 
       if (Hls.isSupported()) {
-        const hls = new Hls({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 8, maxMaxBufferLength: 15 });
+        const hls = new Hls({
+          enableWorker: true, lowLatencyMode: false, maxBufferLength: 8, maxMaxBufferLength: 15,
+          // Defaults (10s manifest / 20s fragment) are tuned for a single
+          // stream. A cold 3x3+ grid queues several distinct cameras' first
+          // playlist/key/segment fetches behind the backend's own upstream
+          // concurrency gate (bounded on purpose — the Cloudflare-fronted CDN
+          // 403s a true unbounded burst) — measured directly against
+          // production, the backend genuinely completes these requests, just
+          // not always inside hls.js's default patience window while queued.
+          // More patience here trades a slightly slower first frame for not
+          // giving up on (and retry-storming) a request that was already
+          // going to succeed.
+          manifestLoadingTimeOut: 20000,
+          manifestLoadingMaxRetry: 2,
+          fragLoadingTimeOut: 30000,
+        });
         hlsRef.current = hls;
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
