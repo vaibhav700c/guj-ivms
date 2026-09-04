@@ -88,35 +88,70 @@ async def _get_sentinel_cookie() -> str:
     return _cached_cookie
 
 
-async def _upstream_get(url: str, timeout: float = 20.0) -> httpx.Response:
-    """Fetch a Sentinel CDN URL with the session cookie, re-authenticating once.
+# Cloudflare rate-limits by source IP, and this backend is a single IP serving
+# every viewer. A 9-tile grid firing nine cold playlist fetches at once is
+# enough to get most of them 403'd, so upstream concurrency is capped and
+# identical concurrent fetches are coalesced into one.
+_UPSTREAM_CONCURRENCY = 2
+_upstream_gate: asyncio.Semaphore | None = None
+_inflight: dict[str, asyncio.Task] = {}
 
-    Cloudflare fronts this CDN and answers 403 when it dislikes the caller, and
-    the session can lapse independently, so a single retry after a forced
-    re-auth covers both. Transport errors are mapped to 502 — previously they
-    escaped as opaque 500s.
-    """
+
+def _gate() -> asyncio.Semaphore:
+    # Created lazily so it binds to the running loop, not import time.
+    global _upstream_gate
+    if _upstream_gate is None:
+        _upstream_gate = asyncio.Semaphore(_UPSTREAM_CONCURRENCY)
+    return _upstream_gate
+
+
+async def _fetch_once(url: str, cookie: str, timeout: float) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        return await client.get(
+            url,
+            cookies={SENTINEL_COOKIE_NAME: cookie},
+            headers={"User-Agent": SPOOFED_USER_AGENT},
+        )
+
+
+async def _do_upstream_get(url: str, timeout: float) -> httpx.Response:
     global _cached_cookie
+    async with _gate():
+        try:
+            resp = await _fetch_once(url, await _get_sentinel_cookie(), timeout)
 
-    async def _attempt(cookie: str) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            return await client.get(
-                url,
-                cookies={SENTINEL_COOKIE_NAME: cookie},
-                headers={"User-Agent": SPOOFED_USER_AGENT},
-            )
-
-    try:
-        resp = await _attempt(await _get_sentinel_cookie())
-        if resp.status_code in (302, 401, 403):
-            _cached_cookie = None  # force a fresh session, then retry once
-            resp = await _attempt(await _get_sentinel_cookie())
-    except httpx.HTTPError as exc:
-        raise HTTPException(502, f"Upstream request failed: {exc}") from exc
+            if resp.status_code in (302, 401):
+                # Session lapsed — a fresh login is the right remedy.
+                _cached_cookie = None
+                resp = await _fetch_once(url, await _get_sentinel_cookie(), timeout)
+            elif resp.status_code == 403:
+                # Cloudflare throttling, not an auth failure. Re-authenticating
+                # would only add another request from the same IP, so back off
+                # briefly and retry with the existing session instead.
+                await asyncio.sleep(1.5)
+                resp = await _fetch_once(url, await _get_sentinel_cookie(), timeout)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Upstream request failed: {exc}") from exc
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
     return resp
+
+
+async def _upstream_get(url: str, timeout: float = 20.0) -> httpx.Response:
+    """Fetch a Sentinel CDN URL, coalescing concurrent requests for the same URL.
+
+    Without coalescing, every tile showing the same camera issues its own
+    upstream fetch; with it, one fetch serves them all. Transport errors are
+    mapped to 502 — they previously escaped as opaque 500s.
+    """
+    task = _inflight.get(url)
+    if task is None:
+        task = asyncio.create_task(_do_upstream_get(url, timeout))
+        _inflight[url] = task
+        task.add_done_callback(lambda _t, u=url: _inflight.pop(u, None))
+    # shield so one client disconnecting does not cancel the shared fetch
+    return await asyncio.shield(task)
 
 
 def _build_stream_info(cam_id: str) -> dict:
