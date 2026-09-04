@@ -27,7 +27,9 @@ Run:
     .venv/bin/python worker.py enroll --entry-id 6 --image face.jpg
     .venv/bin/python worker.py run                      # live pipeline
 
-Env: INGEST_URL (default http://localhost:8000), INGEST_API_KEY,
+Env: SENTINEL_EMAIL + SENTINEL_PASSWORD (REQUIRED — the grid answers 401 to
+     every RTSP connection without them),
+     INGEST_URL (default http://localhost:8000), INGEST_API_KEY,
      CAMERA_IDS (comma-separated DB ids, default "1,6,12"),
      RTSP_BASE (default rtsp://103.250.160.189:8554/stream),
      SAMPLE_FPS (default 2.0), FACE_EVERY_S (default 15)
@@ -37,9 +39,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import threading
 import time
 from collections import defaultdict
+from urllib.parse import quote
 
 import cv2
 import httpx
@@ -59,6 +63,10 @@ log = logging.getLogger("analytics-worker")
 INGEST_URL = os.environ.get("INGEST_URL", "http://localhost:8000").rstrip("/")
 INGEST_API_KEY = os.environ.get("INGEST_API_KEY", "")
 RTSP_BASE = os.environ.get("RTSP_BASE", "rtsp://103.250.160.189:8554/stream")
+# The grid authenticates EVERY RTSP connection against the registered account,
+# so these are required — without them the gateway answers 401 to DESCRIBE.
+SENTINEL_EMAIL = os.environ.get("SENTINEL_EMAIL", "")
+SENTINEL_PASSWORD = os.environ.get("SENTINEL_PASSWORD", "")
 CAMERA_IDS = [int(c) for c in os.environ.get("CAMERA_IDS", "1,6,12").split(",") if c.strip()]
 SAMPLE_FPS = float(os.environ.get("SAMPLE_FPS", "2.0"))        # inference rate per camera
 FACE_EVERY_S = float(os.environ.get("FACE_EVERY_S", "15"))     # face pass cadence
@@ -79,7 +87,24 @@ def normalize_plate(text: str) -> str:
 
 
 def rtsp_url(camera_id: int) -> str:
-    return f"{RTSP_BASE}/cam{camera_id:02d}"
+    """Build the credentialed RTSP URL for a camera.
+
+    Credentials go in the userinfo section because the gateway challenges every
+    connection. The '@' in the email MUST be percent-encoded or it splits the
+    userinfo from the host and the URL resolves to the wrong server.
+    """
+    base = RTSP_BASE.rstrip("/")
+    authority = base.partition("://")[2].split("/", 1)[0]
+    if SENTINEL_EMAIL and SENTINEL_PASSWORD and "@" not in authority:
+        scheme, _, rest = base.partition("://")
+        creds = f"{quote(SENTINEL_EMAIL, safe='')}:{quote(SENTINEL_PASSWORD, safe='')}"
+        base = f"{scheme}://{creds}@{rest}"
+    return f"{base}/cam{camera_id:02d}"
+
+
+def redact(url: str) -> str:
+    """Strip userinfo before a URL reaches the logs — errors echo the full URL."""
+    return re.sub(r"//[^@/]+@", "//***:***@", url)
 
 
 def external_id(camera_id: int) -> str:
@@ -326,7 +351,7 @@ class CameraPipeline(threading.Thread):
                         cap.release()
             except Exception as exc:
                 log.warning("[%s] stream error: %s — retry in %.0fs",
-                            external_id(self.camera_id), exc, self._backoff)
+                            external_id(self.camera_id), redact(str(exc)), self._backoff)
             if container is not None:
                 try:
                     container.close()
@@ -342,18 +367,28 @@ class CameraPipeline(threading.Thread):
                 "w": round(x2 - x1), "h": round(y2 - y1)}
 
     def _vehicle_type_at(self, plate_box, detections) -> str | None:
-        """Assign the vehicle class whose box best contains the plate centre."""
+        """Assign the vehicle class whose box best contains the plate centre.
+
+        Indexes the parallel arrays rather than iterating: `sv.Detections`
+        yields plain tuples when iterated, not per-detection objects.
+        """
+        if detections is None or len(detections) == 0:
+            return None
         px, py, pw, ph = plate_box
         pcx, pcy = px + pw / 2, py + ph / 2
-        best, best_area = None, 0
-        for det in detections:
-            if det.class_id[0] not in VEHICLE_CLASSES:
+        best, best_area = None, 0.0
+        class_ids = getattr(detections, "class_id", None)
+        if class_ids is None:
+            return None
+        for i in range(len(detections)):
+            cls = int(class_ids[i])
+            if cls not in VEHICLE_CLASSES:
                 continue
-            x1, y1, x2, y2 = det.xyxy[0]
+            x1, y1, x2, y2 = [float(v) for v in detections.xyxy[i]]
             if x1 <= pcx <= x2 and y1 <= pcy <= y2:
                 area = (x2 - x1) * (y2 - y1)
                 if area > best_area:
-                    best_area, best = area, det.class_id[0]
+                    best_area, best = area, cls
         return VEHICLE_TYPE_BY_CLASS.get(best)
 
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
@@ -380,12 +415,24 @@ class CameraPipeline(threading.Thread):
                      result.get("status"))
 
     def _push_tracks(self, detections) -> None:
+        """Push one metadata event per tracked vehicle/person, rate-limited.
+
+        Indexes the parallel arrays rather than iterating: `sv.Detections`
+        yields plain tuples when iterated, not per-detection objects.
+        """
+        if detections is None or len(detections) == 0:
+            return
+        class_ids = getattr(detections, "class_id", None)
+        if class_ids is None:
+            return
+        confidences = getattr(detections, "confidence", None)
+        tracker_ids = getattr(detections, "tracker_id", None)
         now = time.time()
-        for det in detections:
-            cls = det.class_id[0]
+        for i in range(len(detections)):
+            cls = int(class_ids[i])
             if cls not in VEHICLE_CLASSES and cls not in PERSON_CLASSES:
                 continue
-            track_id = int(det.tracker_id[0]) if det.tracker_id is not None else None
+            track_id = int(tracker_ids[i]) if tracker_ids is not None else None
             key = str(track_id) if track_id is not None else f"raw-{cls}"
             if now - self._last_track_push.get(key, 0) < PUSH_DETECTION_EVERY_S:
                 continue
@@ -393,8 +440,8 @@ class CameraPipeline(threading.Thread):
             self.ingest.detection(
                 camera_id=self.camera_id,
                 event_type="person" if cls in PERSON_CLASSES else "vehicle",
-                confidence=float(det.confidence[0]),
-                bbox=self._xyxy_to_bbox(det.xyxy[0]),
+                confidence=float(confidences[i]) if confidences is not None else 0.0,
+                bbox=self._xyxy_to_bbox(detections.xyxy[i]),
                 track_id=f"trk-{track_id}" if track_id is not None else None,
             )
 
@@ -484,7 +531,11 @@ class CameraPipeline(threading.Thread):
                     crop = frame[max(y1, 0):y2, max(x1, 0):x2]
                     if crop.size == 0:
                         continue
-                    preds = self.models.plate_ocr.run(crop, return_confidence=True)
+                    # The pinned OCR model is single-channel. Passing a 3-channel
+                    # BGR crop fails ONNX shape validation on the channel axis,
+                    # which silently disabled ANPR for every frame.
+                    crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    preds = self.models.plate_ocr.run(crop_gray, return_confidence=True)
                     for pred in preds:
                         text = pred.plate
                         ocr_conf = (
@@ -545,7 +596,7 @@ def cmd_test_rtsp(args) -> None:
                 break
             container.close()
         except Exception as exc:
-            log.info("PyAV failed (%s) — trying OpenCV", exc)
+            log.info("PyAV failed (%s) — trying OpenCV", redact(str(exc)))
     if frame is None:
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         for _ in range(150):  # up to ~15s for first IDR (mixed H.264/H.265 joins)
@@ -555,9 +606,14 @@ def cmd_test_rtsp(args) -> None:
             time.sleep(0.1)
         cap.release()
     if frame is None:
-        raise SystemExit(f"no frame from {url}")
+        raise SystemExit(
+            f"no frame from {redact(url)}"
+            + ("" if (SENTINEL_EMAIL and SENTINEL_PASSWORD) else
+               " — SENTINEL_EMAIL/SENTINEL_PASSWORD are unset, so the gateway "
+               "will answer 401 to every request")
+        )
     cv2.imwrite(out, frame)
-    log.info("saved %s (%dx%d) from %s", out, frame.shape[1], frame.shape[0], url)
+    log.info("saved %s (%dx%d) from %s", out, frame.shape[1], frame.shape[0], redact(url))
 
 
 def cmd_enroll(args) -> None:
