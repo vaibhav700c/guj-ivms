@@ -232,13 +232,23 @@ _ENC_KEY_TTL = 3600.0
 # upstream fetch.
 #
 # Segments are safe to cache indefinitely: the playlist is EXT-X-PLAYLIST-TYPE
-# VOD over a looping feed, so seg00042.ts is always identical. Playlists get a
-# short TTL because they are cheap and rarely change.
+# VOD over a looping feed, so seg00042.ts is always identical. The playlist
+# itself is a full VOD listing of the entire loop (~400KB, thousands of
+# segments), not a small live-window manifest — measured at ~25-30s to
+# re-fetch from the Cloudflare-fronted CDN under load. A short TTL was
+# forcing that expensive re-fetch on every viewer every few seconds, which
+# starved the upstream concurrency gate and stalled segment delivery behind
+# it (segments only play for ~6s each; a queued cold fetch behind a 27s
+# playlist re-fetch guarantees a stall). The playlist barely changes, so a
+# much longer TTL removes that cost with no real staleness risk.
 _playlist_cache: dict[str, tuple[float, str]] = {}
-_PLAYLIST_TTL = 5.0
+_PLAYLIST_TTL = 60.0
 
 _segment_cache: "OrderedDict[str, bytes]" = OrderedDict()
-_SEGMENT_CACHE_MAX = 40  # ~270KB each → caps this cache near 11MB of the 512MB
+_SEGMENT_CACHE_MAX = 200  # ~270KB each → ~54MB of the 512MB budget. 40 was too
+# small for concurrent viewers advancing through the same multi-hour VOD loop:
+# it evicted usable segments almost immediately, forcing a ~12s cold fetch
+# (for 6s of video) on nearly every tick instead of serving from cache.
 
 
 def _cache_segment(key: str, content: bytes) -> None:
