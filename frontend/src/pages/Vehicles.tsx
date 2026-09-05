@@ -207,7 +207,16 @@ interface Journey {
 const DEFAULT_CENTER: [number, number] = [22.6, 71.6];
 
 export default function Vehicles() {
-  const [plate, setPlate] = useState("GJ 01 AB 1234");
+  // "GJ 01 AB 1234" used to be the default here — it's the plate the old demo
+  // simulator hardcoded and sprayed across cameras to fake a journey (see
+  // CLAUDE.md "Two event sources"). With real-only filtering now correctly
+  // returning nothing for it, that default made the very first thing a
+  // visitor saw a guaranteed "no sightings" result. "GJ 11 T 5967" is a real,
+  // corroborated plate (cam06, Timbavadi Gate — GJ-11 is genuinely the
+  // Junagadh RTO code) so the page demonstrates a real result by default.
+  const [plate, setPlate] = useState(
+    () => new URLSearchParams(window.location.search).get("plate") ?? "GJ 11 T 5967"
+  );
   const [journey, setJourney] = useState<Journey | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -242,6 +251,15 @@ export default function Vehicles() {
     if (journey) search(undefined, journey.plate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [realOnly]);
+
+  // Auto-search on mount so a pre-filled plate (the default, or one handed
+  // off via ?plate= from the GIS map's "Track a vehicle" link) shows a real
+  // result immediately instead of an empty page waiting for the user to
+  // press the button on a value they didn't type themselves.
+  useEffect(() => {
+    search(undefined, plate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const shown = journey ? journey.sightings.slice(0, Math.max(step, 1)) : [];
   const last = shown[shown.length - 1];

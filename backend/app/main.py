@@ -1,4 +1,5 @@
 """Gujarat IVMS — FastAPI application entry point."""
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -127,8 +128,13 @@ async def lifespan(app: FastAPI):
             )
         else:
             await simulator.start()
+    # Keeps the default live-grid cameras' HLS cache warm so a viewer's first
+    # /live load doesn't pay the ~49s cold-playlist / ~36s cold-segment cost
+    # measured against the upstream CDN — see cache_warmer_loop's own comment.
+    warm_task = asyncio.create_task(sentinel_routes.cache_warmer_loop())
     logger.info("%s v%s ready (env=%s)", settings.APP_NAME, settings.VERSION, settings.ENVIRONMENT)
     yield
+    warm_task.cancel()
     await simulator.stop()
 
 

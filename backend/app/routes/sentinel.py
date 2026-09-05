@@ -305,7 +305,7 @@ _LIVE_WINDOW_SEGMENTS = 50
 # is served, instead of waiting for hls.js to ask once its buffer is already
 # empty. This doesn't add upstream load — it's the exact same segments a
 # playing viewer will need next — it just moves the same fetch earlier.
-_PREFETCH_AHEAD = 2
+_PREFETCH_AHEAD = 3
 _prefetched_windows: set[tuple[str, int]] = set()
 
 
@@ -402,6 +402,59 @@ def _playlist_response(body: str) -> Response:
             "Cache-Control": "no-cache, no-store",
         },
     )
+
+
+# ── Live-grid startup latency ────────────────────────────────────────────────
+# The single biggest thing a viewer feels as "the live grid loads slowly" is
+# the FIRST fetch of each tile in LiveView's default grid being genuinely cold
+# — a fresh playlist fetch (up to ~49s measured) followed by a fresh segment
+# fetch (up to ~36s measured) against the same slow upstream CDN. Both are
+# already cached with a 60s TTL once warm, so the fix is simply to make sure
+# they're never cold in the first place for the handful of cameras almost
+# every viewer sees: LiveView opens with the DEFAULT layout ("2x2"), which
+# is always the first 4 cameras (by id) with a stream_url — see
+# `allCams.slice(0, 4)` in LiveView.tsx. This loop just calls the real
+# playlist handler (which already caches + prefetches segments as a side
+# effect) for that same set on a fixed schedule, so by the time any browser
+# actually opens /live, the default grid is warm. This is NOT a load test —
+# it's the same request pattern one real viewer generates, at a bounded,
+# periodic cadence, for a small fixed camera set, well within what a single
+# viewer polling every ~50s would produce.
+_WARM_INTERVAL_S = 50.0  # just under _PLAYLIST_TTL, so cache never fully expires
+_WARM_CAMERA_LIMIT = 4
+
+
+async def _default_warm_camera_ids() -> list[str]:
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Camera.external_id)
+            .filter(Camera.stream_url.isnot(None), Camera.external_id.isnot(None))
+            .order_by(Camera.id)
+            .limit(_WARM_CAMERA_LIMIT)
+            .all()
+        )
+        return [r[0].lower() for r in rows]
+    finally:
+        db.close()
+
+
+async def cache_warmer_loop() -> None:
+    while True:
+        try:
+            cam_ids = await _default_warm_camera_ids()
+            for cam_id in cam_ids:
+                try:
+                    await hls_playlist(cam_id, None)  # type: ignore[arg-type]
+                except Exception:
+                    logger.debug("cache warmer: %s not warmed this cycle", cam_id, exc_info=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("cache warmer loop iteration failed")
+        await asyncio.sleep(_WARM_INTERVAL_S)
 
 
 _enc_key_cache: tuple[float, bytes] | None = None

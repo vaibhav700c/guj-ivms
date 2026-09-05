@@ -79,6 +79,10 @@ PLATE_VOTE_WINDOW_S = float(os.environ.get("PLATE_VOTE_WINDOW_S", "5.0"))
 PLATE_STATIC_WINDOW_S = float(os.environ.get("PLATE_STATIC_WINDOW_S", "20.0"))
 PLATE_STATIC_MIN_REPEATS = int(os.environ.get("PLATE_STATIC_MIN_REPEATS", "4"))
 PLATE_STATIC_GRID_PX = int(os.environ.get("PLATE_STATIC_GRID_PX", "12"))
+# Out of a 64-bit average-hash, how many differing bits still count as "the
+# same content" (tolerates compression noise/lighting flicker on genuinely
+# static background text). See _is_static_plate_box.
+PLATE_STATIC_HASH_TOLERANCE = int(os.environ.get("PLATE_STATIC_HASH_TOLERANCE", "6"))
 FACE_MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.45"))
 FACE_MIN_DETECT_CONF = float(os.environ.get("FACE_MIN_DETECT_CONF", "0.5"))
 PUSH_DETECTION_EVERY_S = float(os.environ.get("PUSH_DETECTION_EVERY_S", "10"))
@@ -678,9 +682,12 @@ class CameraPipeline(threading.Thread):
         # conf 0.82-0.86, format-invalid) fired on ~30+ consecutive sampled
         # frames at an unchanged bbox, accounting for most of that camera's
         # rejected_format volume — a detection-stage false positive, not an
-        # OCR failure. A box recurring at ~the same location repeatedly within
-        # a short window is background, not a plate; skip OCR on it entirely.
-        self._plate_box_hits: dict[tuple[int, int, int, int], list[float]] = {}
+        # OCR failure. A box recurring at ~the same location AND with
+        # near-identical pixel content repeatedly within a short window is
+        # background, not a plate; skip OCR on it entirely. Position alone
+        # is not a safe signal — see _is_static_plate_box's own comment for
+        # why (cam12's toll-barrier queue).
+        self._plate_box_hits: dict[tuple[int, int, int, int], list[tuple[float, int]]] = {}
         self._backoff = 2.0
         self._plate_voter = _PlateVoter()
         self.anpr_stats: dict[str, int] = defaultdict(int)
@@ -823,22 +830,59 @@ class CameraPipeline(threading.Thread):
             return None
         return VEHICLE_TYPE_BY_CLASS.get(best_cls), best_bbox
 
-    def _is_static_plate_box(self, x1: int, y1: int, x2: int, y2: int, now: float) -> bool:
-        """True if a plate-shaped box has fired at ~this location repeatedly
-        within PLATE_STATIC_WINDOW_S — i.e. it's fixed background (OSD
-        timestamp, signage) the detector keeps mistaking for a plate, not a
-        vehicle passing through. See the comment on _plate_box_hits."""
+    @staticmethod
+    def _plate_box_content_hash(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> int | None:
+        """Cheap 64-bit average-hash of a plate-box crop — lets the static
+        filter tell genuinely fixed background (identical pixels every time)
+        apart from a position that's simply reused by different real
+        vehicles over time."""
+        crop = frame[max(y1, 0):y2, max(x1, 0):x2]
+        if crop.size == 0:
+            return None
+        small = cv2.resize(crop, (8, 8), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+        mean = float(gray.mean())
+        bits = 0
+        for v in gray.flatten():
+            bits = (bits << 1) | (1 if v > mean else 0)
+        return bits
+
+    def _is_static_plate_box(self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, now: float) -> bool:
+        """True only if a plate-shaped box has fired at ~this location
+        repeatedly within PLATE_STATIC_WINDOW_S AND the crop's actual pixel
+        content is (near-)identical each time — i.e. genuinely fixed
+        background (an OSD timestamp, printed signage) the detector keeps
+        mistaking for a plate, not a real vehicle that happens to sit at the
+        same spot.
+
+        Position alone is not enough. Measured live on cam12 (Tri Mandir
+        Adalaj Tollnaka — a toll barrier, where real vehicles legitimately
+        queue for well over PLATE_STATIC_WINDOW_S): a position-only version
+        of this filter produced ZERO plate reads across an entire session on
+        a camera whose own operator capability notes say plates and models
+        are exactly readable there. The content hash is what tells "the same
+        background pixels every time" apart from "a procession of different
+        real vehicles that happen to queue at this same pixel location."
+        """
+        content_hash = self._plate_box_content_hash(frame, x1, y1, x2, y2)
+        if content_hash is None:
+            return False
         key = (round(x1 / PLATE_STATIC_GRID_PX), round(y1 / PLATE_STATIC_GRID_PX),
                round(x2 / PLATE_STATIC_GRID_PX), round(y2 / PLATE_STATIC_GRID_PX))
         hits = self._plate_box_hits.setdefault(key, [])
-        hits.append(now)
+        hits.append((now, content_hash))
         cutoff = now - PLATE_STATIC_WINDOW_S
-        while hits and hits[0] < cutoff:
+        while hits and hits[0][0] < cutoff:
             hits.pop(0)
         # Bound memory on long runs: drop keys that have gone idle.
         if len(self._plate_box_hits) > 500:
             self._plate_box_hits = {k: v for k, v in self._plate_box_hits.items() if v}
-        return len(hits) >= PLATE_STATIC_MIN_REPEATS
+        if len(hits) < PLATE_STATIC_MIN_REPEATS:
+            return False
+        matching = sum(
+            1 for _, h in hits if bin(h ^ content_hash).count("1") <= PLATE_STATIC_HASH_TOLERANCE
+        )
+        return matching >= PLATE_STATIC_MIN_REPEATS
 
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
                           conf: float, ocr_conf: float, plate_box,
@@ -1045,7 +1089,7 @@ class CameraPipeline(threading.Thread):
                     if conf < 0.35:
                         continue
                     x1, y1, x2, y2 = [int(v) for v in pbox.xyxy[0]]
-                    if self._is_static_plate_box(x1, y1, x2, y2, time.time()):
+                    if self._is_static_plate_box(frame, x1, y1, x2, y2, time.time()):
                         self.anpr_stats["rejected_static"] += 1
                         continue
                     crop = frame[max(y1, 0):y2, max(x1, 0):x2]
