@@ -3,12 +3,15 @@ import { CheckCheck, CheckCircle, XCircle, BellOff, RefreshCw } from "lucide-rea
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import { useAlertStream } from "../hooks/useAlertStream";
 import InlineError from "../components/InlineError";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 interface AlertItem {
   id: number; alert_type: string; severity: string;
   camera_name: string | null; detected_identifier: string | null;
   match_confidence: number | null; message: string | null;
   status: string; timestamp: string;
+  source?: string;
 }
 
 const SEV_LEFT: Record<string, string> = {
@@ -49,27 +52,32 @@ export default function Alerts() {
   // Shared /ws/alerts connection — Layout owns the socket, this page just
   // reads live state and reacts to new messages. No second socket is opened.
   const { connected, lastEvent } = useAlertStream();
+  const realOnly = useSettings((s) => s.realOnly);
 
   const load = () => {
     setLoading(true);
     const qs = new URLSearchParams({ limit: "200" });
     if (tab) qs.set("status", tab);
     if (severityFilter) qs.set("severity", severityFilter);
+    if (realOnly) qs.set("source", "edge_worker");
     api<{ items: AlertItem[] }>(`/alerts?${qs}`)
       .then((r) => { setItems(r.items); setError(null); })
       .catch((err) => setError(describeApiError(err)))
       .finally(() => { setLoading(false); setLoadedOnce(true); });
   };
-  useEffect(load, [tab, severityFilter]);
+  useEffect(load, [tab, severityFilter, realOnly]);
 
-  // React to new live alerts pushed over the shared WS connection.
+  // React to new live alerts pushed over the shared WS connection. A
+  // fabricated simulator alert never gets injected into the real-only view —
+  // it would otherwise bypass the `?source=edge_worker` list filter entirely.
   useEffect(() => {
     if (!lastEvent?.payload?.id) return;
     const a = lastEvent.payload as unknown as AlertItem;
+    if (realOnly && a.source === "simulator") return;
     if (tab === "" || a.status === tab) {
       setItems((prev) => [a, ...prev].slice(0, 200));
     }
-  }, [lastEvent, tab]);
+  }, [lastEvent, tab, realOnly]);
 
   const setStatus = async (id: number, status: string) => {
     setActioning(id);
@@ -170,6 +178,7 @@ export default function Alerts() {
                 {a.detected_identifier && (
                   <span className="font-mono text-sm font-semibold text-white">{a.detected_identifier}</span>
                 )}
+                {a.source === "simulator" && <SimulatedBadge />}
                 {a.match_confidence != null && (
                   <span className="text-[10px] font-mono text-slate-500 ml-auto">
                     {(a.match_confidence * 100).toFixed(0)}% conf
@@ -221,7 +230,9 @@ export default function Alerts() {
               No {tab || "active"} alerts{severityFilter ? ` at ${severityFilter} severity` : ""}
             </div>
             <div className="text-xs text-slate-600">
-              The simulator generates watchlist hits every few seconds
+              {realOnly
+                ? "Showing genuine edge-worker alerts only — turn off \"Real detections only\" in the top bar to also see demo simulator hits"
+                : "The simulator generates watchlist hits every few seconds"}
             </div>
           </div>
         )}

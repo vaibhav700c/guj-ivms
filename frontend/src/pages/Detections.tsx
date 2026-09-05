@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { RefreshCw, ImageOff, ScanFace, Car as CarIcon, User } from "lucide-react";
 import { api, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
@@ -15,6 +17,7 @@ interface DetectionEvent {
   bbox: { x: number; y: number; w: number; h: number } | null;
   timestamp: string;
   has_evidence_image: boolean;
+  source?: string;
 }
 
 interface Camera { id: number; external_id: string | null; name: string }
@@ -32,12 +35,19 @@ const TYPE_COLOR: Record<string, string> = {
 };
 
 /**
- * Detection Viewer — every event card shows the real annotated frame: a
- * genuine OpenCV bounding box + class label + confidence, drawn by the edge
- * worker (analytics/worker.py::draw_detection_boxes) directly onto the pixels
- * the model ran inference on at the moment of detection. This is not a CSS
+ * Detection Viewer — every event card whose event is a genuine `edge_worker`
+ * detection shows the real annotated frame: a genuine OpenCV bounding box +
+ * class label + confidence, drawn by the edge worker
+ * (analytics/worker.py::draw_detection_boxes) directly onto the pixels the
+ * model ran inference on at the moment of detection. This is not a CSS
  * overlay computed from stored bbox coordinates — the box is baked into the
  * JPEG itself, so what you see here is exactly what the model saw and found.
+ *
+ * The demo simulator (backend/app/simulator.py) also writes rows into this
+ * same table so the page is demonstrable without cameras, but those events
+ * never carry a real frame — see CLAUDE.md "Two event sources". Every card
+ * backed by a `source === "simulator"` event is badged SIMULATED, and the
+ * page respects the global "Real detections only" toggle.
  */
 export default function Detections() {
   const [items, setItems] = useState<DetectionEvent[]>([]);
@@ -49,12 +59,14 @@ export default function Detections() {
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [onlyWithFrame, setOnlyWithFrame] = useState(true);
+  const realOnly = useSettings((s) => s.realOnly);
 
   const load = () => {
     setLoading(true);
     const params = new URLSearchParams({ limit: "60" });
     if (eventType) params.set("event_type", eventType);
     if (cameraId) params.set("camera_id", cameraId);
+    if (realOnly) params.set("source", "edge_worker");
     api<{ total: number; items: DetectionEvent[] }>(`/analytics/events?${params}`)
       .then((r) => { setItems(r.items); setError(null); })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
@@ -71,9 +83,10 @@ export default function Detections() {
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventType, cameraId, autoRefresh]);
+  }, [eventType, cameraId, autoRefresh, realOnly]);
 
   const shown = onlyWithFrame ? items.filter((i) => i.has_evidence_image) : items;
+  const anySimulated = shown.some((i) => i.source === "simulator");
 
   return (
     <div className="space-y-4 max-w-[1400px]">
@@ -81,7 +94,11 @@ export default function Detections() {
         <div>
           <h1 className="page-title">Detection Viewer</h1>
           <p className="page-subtitle">
-            Real bounding boxes drawn by the edge worker (OpenCV) on the actual detection frame — not a mockup.
+            {realOnly
+              ? "Real bounding boxes drawn by the edge worker (OpenCV) on the actual detection frame — not a mockup."
+              : anySimulated
+              ? "Real bounding boxes drawn by the edge worker (OpenCV) on the actual detection frame for genuine events — cards marked SIMULATED below are fabricated by the demo simulator and carry no real frame."
+              : "Real bounding boxes drawn by the edge worker (OpenCV) on the actual detection frame — not a mockup."}
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -121,9 +138,9 @@ export default function Detections() {
           No detections {onlyWithFrame ? "with a recorded frame " : ""}match these filters yet.
           {onlyWithFrame && (
             <div className="mt-1 text-xs text-slate-600">
-              Try unchecking "Only with frame" — the demo simulator generates events without an image;
-              a real detection frame only exists for events produced by the actual edge worker
-              (analytics/worker.py or the Investigate page's local control server).
+              {realOnly
+                ? 'Try unchecking "Only with frame" below, or turn off "Real detections only" in the top bar to also include the demo simulator\'s fabricated events (badged SIMULATED, no real frame).'
+                : 'Try unchecking "Only with frame" — the demo simulator generates events without an image; a real detection frame only exists for events produced by the actual edge worker (analytics/worker.py or the Investigate page\'s local control server).'}
             </div>
           )}
         </div>
@@ -154,6 +171,9 @@ export default function Detections() {
                 <span className="absolute top-2 right-2 badge bg-black/60 text-white border border-white/10 font-mono">
                   {(d.confidence * 100).toFixed(0)}%
                 </span>
+                {d.source === "simulator" && (
+                  <SimulatedBadge className="absolute bottom-2 left-2" />
+                )}
               </div>
               <div className="p-2.5 text-xs">
                 <div className="text-slate-300 truncate">{d.camera_name ?? `Camera #${d.camera_id}`}</div>

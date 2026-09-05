@@ -7,6 +7,8 @@ import {
   Search, Route, MapPin, Clock, Pause, RotateCcw, Navigation,
 } from "lucide-react";
 import { api, formatDateTime } from "../lib/api";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 interface Camera {
   id: number; external_id: string; name: string; city: string | null;
@@ -29,6 +31,7 @@ interface Waypoint {
   lat: number; lng: number; city: string | null;
   timestamp: string; direction: string | null; confidence: number;
   vehicle_type: string | null; vehicle_color: string | null; snapshot_ref?: string | null;
+  source?: string;
 }
 interface Journey {
   plate: string; journey_start: string | null; journey_end: string | null;
@@ -43,19 +46,26 @@ const TIER_COLOR: Record<string, string> = {
   A: "#f97316", B: "#06b6d4", C: "#475569",
 };
 
-// Numbered divIcon for a route waypoint — active waypoint gets a bigger, brighter badge.
-function waypointIcon(index: number, active: boolean): L.DivIcon {
+// Numbered divIcon for a route waypoint — active waypoint gets a bigger,
+// brighter badge. A waypoint backed by a `source === "simulator"` event
+// (fabricated by the demo simulator, never a genuine sighting — see CLAUDE.md
+// "Two event sources") renders in the same amber used by badge-simulated
+// elsewhere, with a dashed ring, so a fabricated route can never be mistaken
+// for a real one at a glance.
+function waypointIcon(index: number, active: boolean, simulated: boolean): L.DivIcon {
   const size = active ? 28 : 20;
+  const accent = simulated ? "#f59e0b" : "#f97316";
+  const activeGlow = simulated ? "#fde68a" : "#fdba74";
   return L.divIcon({
     className: "",
     html: `<div style="
         width:${size}px;height:${size}px;border-radius:9999px;
         display:flex;align-items:center;justify-content:center;
-        background:${active ? "#f97316" : "#1e293b"};
-        border:2px solid ${active ? "#fdba74" : "#f97316"};
-        color:${active ? "#0b0f14" : "#f97316"};
+        background:${active ? accent : "#1e293b"};
+        border:2px ${simulated ? "dashed" : "solid"} ${active ? activeGlow : accent};
+        color:${active ? "#0b0f14" : accent};
         font:${active ? "700 12px" : "600 10px"} ui-sans-serif,system-ui,sans-serif;
-        box-shadow:${active ? "0 0 0 4px rgba(249,115,22,0.25)" : "none"};
+        box-shadow:${active ? `0 0 0 4px ${simulated ? "rgba(245,158,11,0.25)" : "rgba(249,115,22,0.25)"}` : "none"};
       ">${index + 1}</div>`,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
@@ -97,6 +107,7 @@ export default function MapView() {
   const [activeIndex, setActiveIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const replayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const realOnly = useSettings((s) => s.realOnly);
 
   useEffect(() => {
     api<{ items: Camera[] }>("/cameras?limit=500").then((r) => setCameras(r.items)).catch(() => undefined);
@@ -109,9 +120,9 @@ export default function MapView() {
     setActiveIndex(0);
   };
 
-  const loadJourney = async (e?: React.FormEvent) => {
+  const loadJourney = async (e?: React.FormEvent, plateOverride?: string) => {
     e?.preventDefault();
-    const trimmed = plateQuery.trim();
+    const trimmed = (plateOverride ?? plateQuery).trim();
     if (!trimmed) { setJourneyError("Enter a plate number, e.g. GJ 01 AB 1234"); return; }
     setPlaying(false);
     setJourney(null);
@@ -119,7 +130,10 @@ export default function MapView() {
     setJourneyLoading(true);
     setJourneyError("");
     try {
-      const data = await api<Journey>(`/vehicles/journey/${encodeURIComponent(trimmed)}`);
+      const params = new URLSearchParams();
+      if (realOnly) params.set("source", "edge_worker");
+      const qs = params.toString();
+      const data = await api<Journey>(`/vehicles/journey/${encodeURIComponent(trimmed)}${qs ? `?${qs}` : ""}`);
       setJourney(data);
       if (!data.waypoints || data.waypoints.length === 0) {
         setJourneyError(`No sightings recorded for ${data.plate || trimmed} yet.`);
@@ -134,6 +148,15 @@ export default function MapView() {
       setJourneyLoading(false);
     }
   };
+
+  // Re-run the currently displayed route when the "Real detections only"
+  // toggle flips, so a route on screen never silently goes stale relative to
+  // the filter — a fabricated route left on the map after the toggle is
+  // switched on would be the most misleading thing this page could show.
+  useEffect(() => {
+    if (journey) loadJourney(undefined, journey.plate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realOnly]);
 
   // Animated replay — steps the active waypoint forward on an interval.
   useEffect(() => {
@@ -265,11 +288,19 @@ export default function MapView() {
             {hasRoute && journey && (
               <div className="card p-3 space-y-2.5 shadow-lg animate-slide-in-up">
                 <div className="flex items-center justify-between">
-                  <div className="font-mono text-sm text-orange-400 font-bold">{journey.plate}</div>
+                  <div className="font-mono text-sm text-orange-400 font-bold flex items-center gap-1.5">
+                    {journey.plate}
+                    {journey.waypoints.some((w) => w.source === "simulator") && <SimulatedBadge />}
+                  </div>
                   <button onClick={clearRoute} className="btn-icon w-6 h-6" title="Clear route">
                     <X size={12} />
                   </button>
                 </div>
+                {journey.waypoints.some((w) => w.source === "simulator") && (
+                  <div className="text-[10px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-2 py-1">
+                    This route includes waypoints fabricated by the demo simulator (dashed amber markers) — not a genuine sighting.
+                  </div>
+                )}
                 <div className="text-[11px] space-y-1 text-slate-300">
                   <div className="flex items-center gap-1.5"><Navigation size={11} className="text-orange-400" /> {journey.total_cameras} cameras · {journey.total_distance_km} km</div>
                   <div className="flex items-center gap-1.5"><MapPin size={11} className="text-orange-400" /> {journey.cities_visited.join(" → ") || "—"}</div>
@@ -378,10 +409,13 @@ export default function MapView() {
                   />
                 )}
                 {journey.waypoints.map((w, i) => (
-                  <Marker key={w.event_id} position={[w.lat, w.lng]} icon={waypointIcon(i, i === activeIndex)}>
+                  <Marker key={w.event_id} position={[w.lat, w.lng]} icon={waypointIcon(i, i === activeIndex, w.source === "simulator")}>
                     <Popup>
                       <div className="space-y-1 min-w-[160px]">
-                        <div className="font-bold text-sm text-white">{w.camera_name}</div>
+                        <div className="font-bold text-sm text-white flex items-center gap-1.5">
+                          {w.camera_name}
+                          {w.source === "simulator" && <SimulatedBadge />}
+                        </div>
                         <div className="text-[11px] font-mono text-slate-400">{formatDateTime(w.timestamp)}</div>
                         <div className="text-xs text-slate-300">
                           {w.city ?? "—"} · dir {w.direction ?? "—"} · conf {(w.confidence * 100).toFixed(0)}%

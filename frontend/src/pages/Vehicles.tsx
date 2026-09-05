@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Search, Route, MapPin, Clock, Gauge, Car, Camera as CameraIcon, ImageOff, ShieldQuestion } from "lucide-react";
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup } from "react-leaflet";
 import { api, formatDateTime, snapshotUrl } from "../lib/api";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
@@ -153,6 +155,7 @@ interface Journey {
     has_evidence_image?: boolean;
     vehicle_type: string | null;
     vehicle_color: string | null;
+    source?: string;
   }[];
   legs: {
     from_camera: string | null;
@@ -170,6 +173,7 @@ interface Journey {
     city: string | null;
     timestamp: string;
     confidence: number;
+    source?: string;
   }[];
   probable_reid_matches?: {
     camera_id: number;
@@ -181,6 +185,7 @@ interface Journey {
     similarity: number;
     matched_from_camera: string | null;
     matched_from_timestamp: string;
+    source?: string;
   }[];
 }
 
@@ -192,15 +197,20 @@ export default function Vehicles() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [step, setStep] = useState(0); // replay progress
+  const realOnly = useSettings((s) => s.realOnly);
 
-  const search = async (e?: React.FormEvent) => {
+  const search = async (e?: React.FormEvent, plateOverride?: string) => {
     e?.preventDefault();
+    const q = plateOverride ?? plate;
     setLoading(true);
     setError("");
     setJourney(null);
     setStep(0);
     try {
-      const data = await api<Journey>(`/vehicles/search/${encodeURIComponent(plate)}`);
+      const params = new URLSearchParams();
+      if (realOnly) params.set("source", "edge_worker");
+      const qs = params.toString();
+      const data = await api<Journey>(`/vehicles/search/${encodeURIComponent(q)}${qs ? `?${qs}` : ""}`);
       setJourney(data);
       if (data.sightings_count === 0) setError("No ANPR sightings recorded for this plate yet.");
     } catch (err) {
@@ -209,6 +219,14 @@ export default function Vehicles() {
       setLoading(false);
     }
   };
+
+  // Re-run the currently displayed journey when the "Real detections only"
+  // toggle flips, so a route on screen never silently goes stale relative to
+  // the filter — see CLAUDE.md "Two event sources".
+  useEffect(() => {
+    if (journey) search(undefined, journey.plate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realOnly]);
 
   const shown = journey ? journey.sightings.slice(0, Math.max(step, 1)) : [];
   const last = shown[shown.length - 1];
@@ -306,7 +324,10 @@ export default function Vehicles() {
                     <Popup>
                       <div className="text-xs space-y-1.5">
                         <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-40 h-24" />
-                        <div className="font-semibold">{s.camera_name}</div>
+                        <div className="font-semibold flex items-center gap-1.5">
+                          {s.camera_name}
+                          {s.source === "simulator" && <SimulatedBadge />}
+                        </div>
                         <div className="font-mono text-[10px]">{formatDateTime(s.timestamp)}</div>
                         <div>dir: {s.direction ?? "—"} · conf {(s.confidence * 100).toFixed(0)}%</div>
                       </div>
@@ -334,7 +355,10 @@ export default function Vehicles() {
                   <div className={`w-2.5 h-2.5 rounded-full ${i < step ? "bg-orange-500" : "bg-control-700"}`} />
                   <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-14 h-10" />
                   <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(s.timestamp)}</div>
-                  <div className="flex-1 text-sm text-slate-300">{s.camera_name}</div>
+                  <div className="flex-1 text-sm text-slate-300 flex items-center gap-1.5">
+                    {s.camera_name}
+                    {s.source === "simulator" && <SimulatedBadge />}
+                  </div>
                   <div className="text-xs text-slate-500 capitalize">{s.vehicle_type} · {s.direction}</div>
                   <div className="font-mono text-xs text-slate-500">{(s.confidence * 100).toFixed(0)}%</div>
                 </div>
@@ -354,10 +378,11 @@ export default function Vehicles() {
                   <div key={i} className="px-4 py-2.5 flex items-center gap-3 bg-amber-500/[0.03]">
                     <div className="w-2.5 h-2.5 rounded-full bg-amber-500/70 shrink-0" />
                     <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(m.timestamp)}</div>
-                    <div className="flex-1 text-sm text-slate-300">
+                    <div className="flex-1 text-sm text-slate-300 flex items-center gap-1.5">
                       <span className="font-mono text-amber-300">{m.plate_text}</span>
                       <span className="text-slate-500"> · {m.camera_name ?? "—"}</span>
                       {m.city && <span className="text-slate-600"> ({m.city})</span>}
+                      {m.source === "simulator" && <SimulatedBadge />}
                     </div>
                     <div className="badge bg-amber-500/15 text-amber-400 border border-amber-500/25">
                       {(m.similarity * 100).toFixed(0)}% similarity
@@ -384,8 +409,11 @@ export default function Vehicles() {
                     <div className="w-2.5 h-2.5 rounded-full bg-cyan-500/70 shrink-0" />
                     <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(m.timestamp)}</div>
                     <div className="flex-1 text-sm text-slate-300">
-                      <span className="text-slate-500">{m.camera_name ?? "—"}</span>
-                      {m.city && <span className="text-slate-600"> ({m.city})</span>}
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-slate-500">{m.camera_name ?? "—"}</span>
+                        {m.city && <span className="text-slate-600"> ({m.city})</span>}
+                        {m.source === "simulator" && <SimulatedBadge />}
+                      </span>
                       <span className="text-[10px] text-slate-600 block">
                         matched from {m.matched_from_camera ?? "—"} at {formatDateTime(m.matched_from_timestamp)}
                       </span>

@@ -91,6 +91,7 @@ def _appearance_probable_matches(db: Session, sightings: list[dict], source: str
                     "matched_from_camera": s["camera_name"],
                     "matched_from_timestamp": s["timestamp"],
                     "method": "appearance_reid",
+                    "source": c.source,
                 })
     results.sort(key=lambda r: r["similarity"], reverse=True)
     return results[:20]
