@@ -78,6 +78,15 @@ PLATE_MIN_VOTES = int(os.environ.get("PLATE_MIN_VOTES", "2"))         # corrobor
 PLATE_VOTE_WINDOW_S = float(os.environ.get("PLATE_VOTE_WINDOW_S", "5.0"))
 PLATE_STATIC_WINDOW_S = float(os.environ.get("PLATE_STATIC_WINDOW_S", "20.0"))
 PLATE_STATIC_MIN_REPEATS = int(os.environ.get("PLATE_STATIC_MIN_REPEATS", "4"))
+# Frame-rate independent floor: the same real content must have persisted for
+# at least this many real seconds before it's called static, regardless of
+# SAMPLE_FPS. A pure repeat-COUNT threshold fires faster in wall-clock time
+# whenever SAMPLE_FPS goes up (the same 20s window just contains more
+# samples) — measured live: raising SAMPLE_FPS 2.0 -> 4.0 made a genuinely
+# stationary real truck at cam12's toll barrier get flagged static after ~1s
+# instead of ~2s, cutting the real OCR attempts on it roughly in half. This
+# floor keeps the grace period tied to real elapsed time.
+PLATE_STATIC_MIN_DURATION_S = float(os.environ.get("PLATE_STATIC_MIN_DURATION_S", "8.0"))
 PLATE_STATIC_GRID_PX = int(os.environ.get("PLATE_STATIC_GRID_PX", "12"))
 # Out of a 64-bit average-hash, how many differing bits still count as "the
 # same content" (tolerates compression noise/lighting flicker on genuinely
@@ -879,10 +888,15 @@ class CameraPipeline(threading.Thread):
             self._plate_box_hits = {k: v for k, v in self._plate_box_hits.items() if v}
         if len(hits) < PLATE_STATIC_MIN_REPEATS:
             return False
-        matching = sum(
-            1 for _, h in hits if bin(h ^ content_hash).count("1") <= PLATE_STATIC_HASH_TOLERANCE
-        )
-        return matching >= PLATE_STATIC_MIN_REPEATS
+        matching_times = [
+            t for t, h in hits if bin(h ^ content_hash).count("1") <= PLATE_STATIC_HASH_TOLERANCE
+        ]
+        if len(matching_times) < PLATE_STATIC_MIN_REPEATS:
+            return False
+        # Gate on real elapsed time, not just sample count — see
+        # PLATE_STATIC_MIN_DURATION_S's own comment for why count alone
+        # isn't safe across different SAMPLE_FPS settings.
+        return (now - matching_times[0]) >= PLATE_STATIC_MIN_DURATION_S
 
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
                           conf: float, ocr_conf: float, plate_box,
