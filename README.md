@@ -1,6 +1,22 @@
-# Gujarat IVMS — Integrated Video Management & Analytics Platform
+<div align="center">
 
-> Gujarat Police hackathon build · hybrid architecture (Model 1 + 2 + 3 + selective 4) · 100% open-source
+# Gujarat IVMS
+
+**Integrated Video Management & Analytics Platform**
+*Gujarat Police hackathon build · hybrid architecture (Model 1 + 2 + 3 + selective 4)*
+
+[![CI](https://github.com/vaibhav700c/guj-ivms/actions/workflows/ci.yml/badge.svg)](https://github.com/vaibhav700c/guj-ivms/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](backend/requirements.txt)
+[![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688?logo=fastapi&logoColor=white)](backend)
+[![React 18](https://img.shields.io/badge/frontend-React%2018-61DAFB?logo=react&logoColor=white)](frontend)
+[![100% Open Source](https://img.shields.io/badge/stack-100%25%20open--source-success)](#tech-stack)
+
+[**Live Demo**](https://guj-ivms.vercel.app) · [**API Docs**](https://guj-ivms-api.onrender.com/docs) · [Architecture](#architecture) · [Quick Start](#quick-start) · [What's Real](#whats-real-and-how-thats-actually-enforced)
+
+</div>
+
+---
 
 ```mermaid
 flowchart LR
@@ -22,8 +38,7 @@ flowchart LR
 Raw video never leaves the edge. Only structured metadata — plate strings, bounding
 boxes, confidences, face embeddings — reaches the central platform. That's what makes
 an 80,000-camera target bandwidth-plausible, and it's the one rule every code path here
-follows: never ship frames to the backend. Full component, data-flow and deployment
-diagrams: [`docs/HLD.md`](docs/HLD.md).
+follows: never ship frames to the backend.
 
 The full spec is `plan.md` at the repo root — deliberately gitignored, along with
 `integration_camera.txt` (live camera-grid credentials), because this repository is
@@ -31,7 +46,21 @@ public. If either is missing from your checkout, ask for it rather than guessing
 README and `docs/` describe what's actually built, which is the reliable source for
 current behavior.
 
-## Real data only — how this is actually enforced
+## Contents
+
+- [What's Real, and How That's Actually Enforced](#whats-real-and-how-thats-actually-enforced)
+- [Capability Matrix](#capability-matrix)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [The Real CV Pipeline](#the-real-cv-pipeline)
+- [Investigate](#investigate--wanted-person-photo-search--live-plate-watch)
+- [Deployment](#cloud-deployment-already-wired)
+- [API Surface](#api-surface-v1)
+- [Traps That Have Already Cost Real Debugging Time](#traps-that-have-already-cost-real-debugging-time)
+- [Tech Stack](#tech-stack)
+- [Deliverables](#deliverables)
+
+## What's Real, and How That's Actually Enforced
 
 Every event this platform stores carries a `source` field: `"edge_worker"` for a
 genuine detection from the real CV pipeline, `"simulator"` for the bundled demo
@@ -54,48 +83,68 @@ that's indistinguishable from a real one is worse than an honest "not implemente
 Nothing in this README claims a capability that wasn't independently verified against
 the real Sentinel Grid feeds.
 
-## What's real, and what's honestly still hard
+## Capability Matrix
 
-**Genuinely working, verified against live camera footage, not simulated:**
+| Capability | Status | Evidence |
+|---|---|---|
+| Live HLS video, 30 real Sentinel cameras | ✅ Real | AES-128 decrypted client-side; `docs/HLD.md` §4 |
+| YOLOv8 person/vehicle/face detection | ✅ Real | Bounding box baked into the evidence JPEG by OpenCV, not a CSS overlay |
+| License-plate OCR | ✅ Real, on 9/30 cameras | `GJ11T5967`, cam06 — corroborated: bus lettered "Amrut Institute Junagadh," GJ-11 *is* the Junagadh RTO code |
+| ANPR on the other 21 cameras | ⚠️ Confirmed impossible | Human-reviewed frame-by-frame: glare/distance/motion blur/B&W — skipped, not hallucinated |
+| Cross-camera vehicle re-ID | ✅ Real | HSV appearance histogram, for cameras where plates can't be read |
+| Face re-identification (ArcFace) | ✅ Real, probabilistic | Cosine similarity measured 0.39–0.49 same-person vs 0.08–0.10 different-person |
+| GIS journey reconstruction | ✅ Real | Coordinates joined from the real camera registry, never fabricated |
+| Per-camera capability verification | ✅ Real | Isolated automated run per camera; see Camera Registry → any camera |
+| 30-camera concurrent throughput | ⚠️ Measured limit | 5–14× frame-rate drop under full parallelism on one machine — a real hardware ceiling |
+| Event provenance (`source` field) | ✅ Enforced server-side | Client can never set it; see above |
 
-- Live HLS video from 30 real Sentinel Grid cameras (AES-128 decrypted client-side)
-- Real-time YOLOv8 person/vehicle/face detection, with the actual bounding box
-  drawn by OpenCV directly into the evidence JPEG — not a CSS overlay computed
-  after the fact, the box is baked into the pixels the model actually saw
-- Real license-plate OCR with Indian-format validation (RTO district table, 4-digit
-  tail, no ambiguous I/O series letters) and multi-read voting before anything is
-  accepted — corroborated example: `GJ11T5967` on cam06 (Timbavadi Gate, Junagadh),
-  a school bus lettered "Amrut Institute Junagadh" — GJ-11 genuinely is the
-  Junagadh RTO code
-- Real ArcFace face embeddings + cosine-similarity re-identification across cameras
-- Cross-camera vehicle re-identification via HSV appearance histograms, for the
-  cameras where plate OCR is confirmed physically impossible (see below)
-- GIS coordinates and journey reconstruction driven entirely by real detection
-  events joined to the real camera registry — no fabricated routes or coordinates
-- Per-camera CV capability verification: an automated, isolated run of the real
-  pipeline against one camera, recording exactly what it found (frame count,
-  detections by type, plates read, a real representative evidence photo) —
-  see **Camera Registry** → any camera → "Verified CV Capability"
+## Architecture
 
-**Measured, not assumed, and honestly reported:**
+**Hybrid — Model 1 (Registry+GIS) + Model 2 (Unified Viewing) + Model 3 (Federation
+Ingest) + selective Model 4 (centralized analytics/alerts).**
 
-- Plate OCR accuracy is fundamentally limited by camera resolution and lighting on
-  most of the 30 feeds. 11 of 30 cameras were reviewed frame-by-frame by a human
-  operator and confirmed physically incapable of a legible plate read (headlight
-  glare, distance, motion blur, B&W night mode) — those cameras skip ANPR entirely
-  rather than let an OCR model hallucinate on noise it can't resolve. The 9
-  cameras confirmed plate-legible do produce real, corroborated reads; the rest of
-  the grid falls back to appearance-based vehicle correlation.
-- Running many camera pipelines concurrently on one machine measurably degrades
-  each one's real frame rate — a 30-camera parallel sweep dropped effective
-  throughput to 5-14× below target on a single laptop, which is a genuine hardware
-  ceiling, not a bug, and is exactly why the edge worker is designed to scale
-  horizontally across nodes rather than vertically on one box.
-- Face re-identification requires the same enrolled person to physically re-appear
-  in frame; this is inherently probabilistic on wide-angle traffic cameras and
-  isn't claimed to work on demand.
+```mermaid
+flowchart TB
+    subgraph EDGE["EDGE — operator's own machine (never Render; needs ~2GB RAM)"]
+        CAM[("Sentinel Grid<br/>30 real CCTV cameras<br/>RTSP + HLS")]
+        WORKER["analytics/worker.py<br/>YOLOv8n · ByteTrack · fast-plate-ocr · InsightFace ArcFace"]
+        CTRL["control_server.py :8800<br/>Investigate bridge (local-only)"]
+        OFFLINE["offline_capture.py<br/>no backend needed during capture"]
+        CAM -- RTSP --> WORKER
+        CTRL -.drives.-> WORKER
+        OFFLINE -.reuses.-> WORKER
+    end
 
-## Quick start (zero-config dev)
+    subgraph CENTRAL["CENTRAL PLATFORM — Render (Docker + managed Postgres)"]
+        API["FastAPI backend<br/>correlation · GIS · search · HLS proxy"]
+        DB[("PostgreSQL<br/>source-tagged events")]
+        API --- DB
+    end
+
+    subgraph CLIENT["CONTROL ROOM — Vercel"]
+        UI["React 18 + Vite SPA"]
+    end
+
+    WORKER -- "metadata only<br/>POST /ingest/{anpr,detection}<br/>source=edge_worker (server-forced)" --> API
+    CAM -- "HLS, AES-128<br/>proxied + cached" --> API
+    API -- "REST + WebSocket" --> UI
+    UI -- "upload photo / enter plate" --> CTRL
+
+    style EDGE fill:#0d1a2e,stroke:#f97316,color:#e2e8f0
+    style CENTRAL fill:#0d1a2e,stroke:#06b6d4,color:#e2e8f0
+    style CLIENT fill:#0d1a2e,stroke:#10b981,color:#e2e8f0
+```
+
+The edge/central split isn't incidental — Render's free tier (512MB RAM, 0.1 CPU)
+cannot run YOLOv8 + InsightFace + plate OCR, which need roughly 2GB RAM under load.
+Running the real CV stack on the operator's own machine is what makes "analytics at
+the edge" literally true rather than a slide.
+
+**Full detail — component table, the real detection→alert sequence diagram, and the
+deployment topology diagram — lives in [`docs/HLD.md`](docs/HLD.md)**, kept there
+rather than duplicated here so there's exactly one place to update.
+
+## Quick Start
 
 ```bash
 # Backend (SQLite fallback — no Postgres needed)
@@ -116,12 +165,13 @@ npx tsc --noEmit && npm run build  # both must pass before committing
 
 Login: `admin` / `admin123` (or just visit — `REQUIRE_AUTH=false` auto-authenticates).
 
-**First load of any route is slow in dev mode** (a few seconds) — that's Vite compiling
-that route's modules on demand, a one-time cost per file per dev-server session, not a
-network or backend problem. `npm run build && npm run preview` skips it entirely
-(confirmed under 2s cold in both modes) and is what's actually deployed to Vercel.
+> **First load of any route is slow in dev mode** (a few seconds) — that's Vite
+> compiling that route's modules on demand, a one-time cost per file per dev-server
+> session, not a network or backend problem. `npm run build && npm run preview` skips
+> it entirely (confirmed under 2s cold in both modes) and is what's actually deployed
+> to Vercel.
 
-## The real CV pipeline
+## The Real CV Pipeline
 
 ```bash
 cd analytics
@@ -165,13 +215,13 @@ annotated detection frames while it runs — not a status line, actual video and
 evidence images. Matches raise real alerts (camera, timestamp, confidence, the real
 detection frame) on **Live Alerts** and the **GIS Map**.
 
-## Full stack (Postgres + PostGIS + Redis + MinIO + MediaMTX)
+## Full Stack (Postgres + PostGIS + Redis + MinIO + MediaMTX)
 
 ```bash
 docker compose up --build
 ```
 
-## Cloud deployment (already wired)
+## Cloud Deployment (already wired)
 
 | Component | URL |
 |---|---|
@@ -191,7 +241,7 @@ Sentinel Grid cameras, watchlist, VAHAN records, and users.
 > status check reads that as success. Setting env vars on Render does **not** itself
 > trigger a redeploy.
 
-## API surface (v1)
+## API Surface (v1)
 
 ```
 POST /api/v1/auth/login                 GET  /api/v1/auth/me
@@ -208,7 +258,7 @@ WS   /ws/alerts                         GET  /health
 
 Interactive docs: `/docs` (Swagger UI). Full reference: [`docs/API.md`](docs/API.md).
 
-## Traps that have already cost real debugging time
+## Traps That Have Already Cost Real Debugging Time
 
 - **`SENTINEL_EMAIL` and `SENTINEL_PASSWORD` are both required**, everywhere the
   Sentinel Grid is touched (HLS proxy, RTSP worker, control_server). Missing either
@@ -230,16 +280,25 @@ Interactive docs: `/docs` (Swagger UI). Full reference: [`docs/API.md`](docs/API
   `Thread.join()`, which may not be called on every code path that uses the thread.
 - Full list, including Render/Postgres-specific traps: see `CLAUDE.md`.
 
-## Tech stack (all free / open-source)
+## Tech Stack
 
-FastAPI · SQLAlchemy 2 · PostgreSQL (+PostGIS/TimescaleDB in the full stack) · Redis ·
-SQLite fallback · React 18 + Vite + TypeScript · Tailwind CSS · Leaflet + OpenStreetMap ·
-Recharts · WebSocket · YOLOv8 (ultralytics) · ByteTrack (supervision) · fast-plate-ocr ·
-InsightFace (buffalo_l / ArcFace) · Docker Compose · MediaMTX · MinIO.
+<div align="center">
+
+| Layer | Technologies |
+|---|---|
+| **Backend** | FastAPI · SQLAlchemy 2 · PostgreSQL (+PostGIS/TimescaleDB) · Redis · SQLite (dev) |
+| **Frontend** | React 18 · Vite · TypeScript · Tailwind CSS · Leaflet + OpenStreetMap · Recharts |
+| **Computer Vision** | YOLOv8 (ultralytics) · ByteTrack (supervision) · fast-plate-ocr · InsightFace (buffalo_l / ArcFace) |
+| **Realtime** | WebSocket · Redis pub/sub |
+| **Infra** | Docker Compose · MediaMTX · MinIO · Render · Vercel |
+
+**All free and open-source — zero licensing cost, zero vendor lock-in.**
+
+</div>
 
 ## Deliverables
 
-- **HLD** — [docs/HLD.md](docs/HLD.md)
+- **HLD** — [docs/HLD.md](docs/HLD.md) *(architecture, data-flow, and deployment diagrams)*
 - **Analytics pipeline** — [docs/ANALYTICS.md](docs/ANALYTICS.md)
 - **Demo script** — [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)
 - **Deployment guide** — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
