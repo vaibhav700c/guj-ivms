@@ -156,6 +156,34 @@ resolution, so no preprocessing recovers it.
 The pipeline itself is proven correct end to end and has landed genuine plates.
 `plate_min_width_px` (default 60, per plan §4) now drops undersized crops and
 counts them as `rejected_too_small`, so the failure is visible and points at
-camera placement instead of producing fabricated plates. Re-measure in daylight
-before concluding anything further. For demos, drive the ANPR narrative from the
-simulator and use the real worker to show the edge pipeline exists.
+camera placement instead of producing fabricated plates.
+
+**Daylight re-measurement (the "re-measure in daylight" above — now done).** In
+daylight on cam06 (Timbavadi Gate, Junagadh) crops arrive ~90-105px wide and the
+pipeline does land real plates: `GJ11T5967` on a school bus lettered "Amrut
+Institute Junagadh", corroborated by GJ-11 being the Junagadh RTO code, with the
+plate box correctly placed on the vehicle's actual number plate. So the night-time
+conclusion is a resolution limit, not a pipeline defect — but read the next
+paragraph before trusting any individual read.
+
+**Two traps this uncovered, both now fixed, both worth remembering.**
+
+1. *A permissive format check manufactures plausible plates.* The validator used
+   to end `\d{1,4}` and allow any series letter, so the same run also published
+   GJ75T21, GJ32R03, GJ13D922, GJ12I394, GJ03O965 and GJ03O935 — all impossible
+   (two/three-digit tails, I- and O-series which Indian plates never use, and a
+   district 75 when Gujarat stops at 38). Six of eight "successes" were noise
+   that happened to fit a loose shape. Precision beats recall here: a missed
+   plate is a coverage gap, a confidently-wrong plate is a false lead attached to
+   a real vehicle.
+
+2. *Plate detectors fire on static background text.* On cam17 the detector was
+   hitting a storefront sign and the camera's own timestamp overlay every single
+   frame — 415 raw "plates" per run, none of them on a vehicle. `_is_static_plate_box`
+   now suppresses boxes that never move, bucketed as `rejected_static`.
+
+OCR remains unstable on borderline crops even in daylight — adjacent frames of
+one physical plate produced structurally different strings, not 1-2 character
+confusion, so a tolerant regex would make things worse rather than better. The
+multi-read voting gate (`_PlateVoter`) is the right safety net and is what
+produced the genuine reads. Do not loosen validation to raise the hit rate.
