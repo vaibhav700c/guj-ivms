@@ -3,6 +3,7 @@ import { Search, Route, MapPin, Clock, Gauge, Car, Camera as CameraIcon, ImageOf
 import { MapContainer, TileLayer, Marker, Polyline, CircleMarker, Popup } from "react-leaflet";
 import { api, formatDateTime, snapshotUrl } from "../lib/api";
 import SimulatedBadge from "../components/SimulatedBadge";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
 import { useSettings } from "../store/settings";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
@@ -38,14 +39,16 @@ function acquireSnapshotSlot(): Promise<() => void> {
   });
 }
 
-function SnapshotThumb({ cameraId, eventId, hasEvidence, className }: {
+function SnapshotThumb({ cameraId, eventId, hasEvidence, className, cameraName, timestamp }: {
   cameraId: number; eventId?: number; hasEvidence?: boolean; className?: string;
+  cameraName?: string | null; timestamp?: string;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const releaseRef = useRef<(() => void) | null>(null);
   const [visible, setVisible] = useState(false);
   const [src, setSrc] = useState<string | null>(null);
   const [status, setStatus] = useState<"pending" | "loading" | "ready" | "error">("pending");
+  const [enlarged, setEnlarged] = useState(false);
 
   // Only start trying once the thumbnail is actually scrolled near the viewport.
   useEffect(() => {
@@ -105,11 +108,14 @@ function SnapshotThumb({ cameraId, eventId, hasEvidence, className }: {
     releaseRef.current = null;
   };
 
+  const clickable = status === "ready" && Boolean(src);
+
   return (
     <div
       ref={hostRef}
-      className={`relative shrink-0 overflow-hidden rounded-lg bg-control-850 border border-control-800/60 ${className ?? "w-14 h-10"}`}
-      title={status === "error" ? "No frame available" : isRealEvidence ? "Real detection frame" : "Live camera snapshot (no detection frame recorded for this sighting)"}
+      className={`relative shrink-0 overflow-hidden rounded-lg bg-control-850 border border-control-800/60 group ${clickable ? "cursor-zoom-in" : ""} ${className ?? "w-14 h-10"}`}
+      title={status === "error" ? "No frame available" : clickable ? "Click to enlarge" : isRealEvidence ? "Real detection frame" : "Live camera snapshot (no detection frame recorded for this sighting)"}
+      onClick={() => clickable && setEnlarged(true)}
     >
       {src && status !== "error" && (
         <img
@@ -131,6 +137,15 @@ function SnapshotThumb({ cameraId, eventId, hasEvidence, className }: {
           {status === "error" ? <ImageOff size={13} /> : <CameraIcon size={13} />}
           {status === "error" && <span className="text-[8px] text-slate-600 leading-none">no frame</span>}
         </div>
+      )}
+      {clickable && <ExpandHint />}
+      {enlarged && src && (
+        <Lightbox
+          src={src}
+          alt={isRealEvidence ? "Real detection frame" : "Live camera snapshot"}
+          caption={[cameraName, timestamp ? formatDateTime(timestamp) : null].filter(Boolean).join(" · ")}
+          onClose={() => setEnlarged(false)}
+        />
       )}
     </div>
   );
@@ -323,7 +338,7 @@ export default function Vehicles() {
                   >
                     <Popup>
                       <div className="text-xs space-y-1.5">
-                        <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-40 h-24" />
+                        <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-40 h-24" cameraName={s.camera_name} timestamp={s.timestamp} />
                         <div className="font-semibold flex items-center gap-1.5">
                           {s.camera_name}
                           {s.source === "simulator" && <SimulatedBadge />}
@@ -353,7 +368,7 @@ export default function Vehicles() {
                 <div key={s.event_id}
                   className={`px-4 py-2.5 flex items-center gap-3 ${i < step ? "" : "opacity-50"}`}>
                   <div className={`w-2.5 h-2.5 rounded-full ${i < step ? "bg-orange-500" : "bg-control-700"}`} />
-                  <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-14 h-10" />
+                  <SnapshotThumb cameraId={s.camera_id} eventId={s.event_id} hasEvidence={s.has_evidence_image} className="w-14 h-10" cameraName={s.camera_name} timestamp={s.timestamp} />
                   <div className="w-44 font-mono text-xs text-slate-400">{formatDateTime(s.timestamp)}</div>
                   <div className="flex-1 text-sm text-slate-300 flex items-center gap-1.5">
                     {s.camera_name}

@@ -127,6 +127,7 @@ def _anpr_item(e: ANPREvent) -> dict:
         "confidence": e.confidence,
         "ocr_confidence": e.ocr_confidence,
         "snapshot_ref": e.snapshot_ref,
+        "has_evidence_image": bool(e.evidence_image_b64),
         "source": e.source,
         "timestamp": e.timestamp.isoformat(),
     }

@@ -3,6 +3,7 @@ import { Search, Download, RefreshCw, Car, Filter } from "lucide-react";
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
 import SimulatedBadge from "../components/SimulatedBadge";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
 import { useSettings } from "../store/settings";
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
@@ -22,6 +23,7 @@ interface AnprEvent {
   snapshot_ref: string | null;
   timestamp: string;
   source?: string;
+  has_evidence_image?: boolean;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -43,6 +45,7 @@ export default function AnprDetections() {
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [liveMode, setLiveMode] = useState(true);
+  const [enlarged, setEnlarged] = useState<AnprEvent | null>(null);
   const liveInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const LIMIT = 50;
@@ -184,6 +187,7 @@ export default function AnprDetections() {
           <table className="w-full min-w-[800px]">
             <thead>
               <tr className="border-b border-control-800 bg-control-850">
+                <th className="table-head">Frame</th>
                 <th className="table-head">Plate</th>
                 <th className="table-head">Vehicle</th>
                 <th className="table-head">Direction</th>
@@ -196,6 +200,27 @@ export default function AnprDetections() {
             <tbody className="divide-y divide-control-800/40">
               {items.map((e) => (
                 <tr key={e.id} className="table-row">
+                  <td className="table-cell">
+                    {e.has_evidence_image ? (
+                      <div
+                        className="relative w-16 h-10 rounded-md overflow-hidden bg-control-850 border border-control-800/60 cursor-zoom-in group"
+                        onClick={() => setEnlarged(e)}
+                        title="Click to enlarge"
+                      >
+                        <img
+                          src={`${BASE}/api/v1/vehicles/events/${e.id}/evidence`}
+                          alt="ANPR detection frame"
+                          loading="lazy"
+                          className="w-full h-full object-cover"
+                        />
+                        <ExpandHint />
+                      </div>
+                    ) : (
+                      <div className="w-16 h-10 rounded-md bg-control-850 border border-control-800/60 flex items-center justify-center text-slate-700 text-[9px]">
+                        no frame
+                      </div>
+                    )}
+                  </td>
                   <td className="table-cell">
                     <div className="flex items-center gap-2">
                       <Car size={13} className={TYPE_COLORS[e.vehicle_type ?? ""] ?? "text-slate-500"} />
@@ -237,7 +262,7 @@ export default function AnprDetections() {
               ))}
               {items.length === 0 && loading && !loadedOnce && (
                 <tr>
-                  <td colSpan={7} className="py-16 text-center">
+                  <td colSpan={8} className="py-16 text-center">
                     <div className="flex flex-col items-center gap-2">
                       <RefreshCw size={18} className="animate-spin text-slate-600" />
                       <span className="text-xs text-slate-600">Loading detections…</span>
@@ -247,14 +272,14 @@ export default function AnprDetections() {
               )}
               {items.length === 0 && loadedOnce && !loading && !error && (
                 <tr>
-                  <td colSpan={7} className="py-16 text-center text-slate-600 text-sm">
+                  <td colSpan={8} className="py-16 text-center text-slate-600 text-sm">
                     No ANPR detections in the selected time range.
                   </td>
                 </tr>
               )}
               {items.length === 0 && error && (
                 <tr>
-                  <td colSpan={7} className="py-16 text-center text-red-400/80 text-sm">
+                  <td colSpan={8} className="py-16 text-center text-red-400/80 text-sm">
                     Could not load ANPR detections — see error above.
                   </td>
                 </tr>
@@ -278,6 +303,15 @@ export default function AnprDetections() {
           </div>
         )}
       </div>
+
+      {enlarged && (
+        <Lightbox
+          src={`${BASE}/api/v1/vehicles/events/${enlarged.id}/evidence`}
+          alt="ANPR detection frame"
+          caption={`${enlarged.plate_text} · ${enlarged.camera_name ?? `cam #${enlarged.camera_id}`} · ${formatDateTime(enlarged.timestamp)}`}
+          onClose={() => setEnlarged(null)}
+        />
+      )}
     </div>
   );
 }

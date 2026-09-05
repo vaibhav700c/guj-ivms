@@ -8,7 +8,10 @@ import {
 } from "lucide-react";
 import { api, formatDateTime } from "../lib/api";
 import SimulatedBadge from "../components/SimulatedBadge";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
 import { useSettings } from "../store/settings";
+
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
 interface Camera {
   id: number; external_id: string; name: string; city: string | null;
@@ -31,7 +34,7 @@ interface Waypoint {
   lat: number; lng: number; city: string | null;
   timestamp: string; direction: string | null; confidence: number;
   vehicle_type: string | null; vehicle_color: string | null; snapshot_ref?: string | null;
-  source?: string;
+  source?: string; has_evidence_image?: boolean;
 }
 interface Journey {
   plate: string; journey_start: string | null; journey_end: string | null;
@@ -106,6 +109,7 @@ export default function MapView() {
   const [journeyError, setJourneyError] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [enlargedWaypoint, setEnlargedWaypoint] = useState<Waypoint | null>(null);
   const replayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const realOnly = useSettings((s) => s.realOnly);
 
@@ -412,6 +416,21 @@ export default function MapView() {
                   <Marker key={w.event_id} position={[w.lat, w.lng]} icon={waypointIcon(i, i === activeIndex, w.source === "simulator")}>
                     <Popup>
                       <div className="space-y-1 min-w-[160px]">
+                        {w.has_evidence_image && (
+                          <div
+                            className="relative w-full h-24 rounded-md overflow-hidden bg-black/40 cursor-zoom-in group -mt-1 mb-1"
+                            onClick={() => setEnlargedWaypoint(w)}
+                            title="Click to enlarge"
+                          >
+                            <img
+                              src={`${API_BASE}/api/v1/vehicles/events/${w.event_id}/evidence`}
+                              alt="Real detection frame"
+                              loading="lazy"
+                              className="w-full h-full object-cover"
+                            />
+                            <ExpandHint />
+                          </div>
+                        )}
                         <div className="font-bold text-sm text-white flex items-center gap-1.5">
                           {w.camera_name}
                           {w.source === "simulator" && <SimulatedBadge />}
@@ -593,6 +612,15 @@ export default function MapView() {
             </div>
           </div>
         </div>
+      )}
+
+      {enlargedWaypoint && (
+        <Lightbox
+          src={`${API_BASE}/api/v1/vehicles/events/${enlargedWaypoint.event_id}/evidence`}
+          alt="Real detection frame"
+          caption={`${enlargedWaypoint.camera_name} · ${formatDateTime(enlargedWaypoint.timestamp)}`}
+          onClose={() => setEnlargedWaypoint(null)}
+        />
       )}
     </div>
   );

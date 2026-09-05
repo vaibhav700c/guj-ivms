@@ -3,6 +3,7 @@ import { RefreshCw, ImageOff, ScanFace, Car as CarIcon, User } from "lucide-reac
 import { api, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
 import SimulatedBadge from "../components/SimulatedBadge";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
 import { useSettings } from "../store/settings";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
@@ -59,6 +60,7 @@ export default function Detections() {
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [onlyWithFrame, setOnlyWithFrame] = useState(true);
+  const [enlarged, setEnlarged] = useState<DetectionEvent | null>(null);
   const realOnly = useSettings((s) => s.realOnly);
 
   const load = () => {
@@ -151,14 +153,20 @@ export default function Detections() {
           const Icon = TYPE_ICON[d.event_type] ?? CarIcon;
           return (
             <div key={d.id} className="card overflow-hidden">
-              <div className="relative aspect-video bg-control-850 flex items-center justify-center">
+              <div
+                className={`relative aspect-video bg-control-850 flex items-center justify-center group ${d.has_evidence_image ? "cursor-zoom-in" : ""}`}
+                onClick={() => d.has_evidence_image && setEnlarged(d)}
+              >
                 {d.has_evidence_image ? (
-                  <img
-                    src={`${API_BASE}/api/v1/analytics/events/${d.id}/evidence`}
-                    alt={`${d.event_type} detection`}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
+                  <>
+                    <img
+                      src={`${API_BASE}/api/v1/analytics/events/${d.id}/evidence`}
+                      alt={`${d.event_type} detection`}
+                      className="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                    <ExpandHint />
+                  </>
                 ) : (
                   <div className="flex flex-col items-center gap-1 text-slate-700">
                     <ImageOff size={20} />
@@ -183,6 +191,15 @@ export default function Detections() {
           );
         })}
       </div>
+
+      {enlarged && (
+        <Lightbox
+          src={`${API_BASE}/api/v1/analytics/events/${enlarged.id}/evidence`}
+          alt={`${enlarged.event_type} detection`}
+          caption={`${enlarged.camera_name ?? `Camera #${enlarged.camera_id}`} · ${formatDateTime(enlarged.timestamp)} · ${(enlarged.confidence * 100).toFixed(0)}%`}
+          onClose={() => setEnlarged(null)}
+        />
+      )}
     </div>
   );
 }

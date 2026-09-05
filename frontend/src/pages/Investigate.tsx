@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
   UserSearch, Car, Upload, Play, Square, RefreshCw, AlertTriangle,
-  CheckCircle, Video, Radio, ExternalLink,
+  CheckCircle, Video, Radio, ExternalLink, ScanEye, ImageOff,
 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
+import StreamTile, { proxyHlsUrl, type StreamCamera } from "../components/StreamTile";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
+
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
 /**
  * "Investigate" — the operator-facing bridge to the local edge pipeline
@@ -21,7 +25,12 @@ import InlineError from "../components/InlineError";
 const CONTROL_BASE =
   (import.meta.env.VITE_CONTROL_SERVER_URL as string | undefined) || "http://localhost:8800";
 
-interface Camera { id: number; external_id: string | null; name: string; city: string | null }
+type Camera = StreamCamera;
+
+interface DetectionEvent {
+  id: number; camera_id: number; event_type: string; confidence: number;
+  timestamp: string; has_evidence_image: boolean;
+}
 interface HealthState {
   status: string;
   models: { yolo: boolean; anpr: boolean; face: boolean };
@@ -69,12 +78,151 @@ function CameraPicker({ cameras, selected, onChange }: {
   );
 }
 
+const TYPE_BOX_COLOR: Record<string, string> = {
+  vehicle: "border-emerald-500/60", person: "border-orange-500/60", face: "border-red-500/60",
+};
+
+/**
+ * The real annotated detection frames for one camera, as the actual edge
+ * pipeline produces them — a genuine OpenCV bounding box baked into the JPEG
+ * at the moment of detection (analytics/worker.py::draw_detection_boxes),
+ * not a mockup. Polls while its parent job is running so new detections
+ * appear here within a few seconds of happening.
+ */
+function DetectionFeed({ cameraId, active }: { cameraId: number; active: boolean }) {
+  const [events, setEvents] = useState<DetectionEvent[]>([]);
+  const [enlarged, setEnlarged] = useState<DetectionEvent | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    const load = () => {
+      api<{ items: DetectionEvent[] }>(`/analytics/events?camera_id=${cameraId}&source=edge_worker&limit=6`)
+        .then((r) => setEvents(r.items.filter((e) => e.has_evidence_image)))
+        .catch(() => undefined);
+    };
+    load();
+    const id = setInterval(load, 4000);
+    return () => clearInterval(id);
+  }, [cameraId, active]);
+
+  if (events.length === 0) {
+    return (
+      <div className="flex items-center gap-1.5 text-[10px] text-slate-600 px-1 py-2">
+        <ScanEye size={11} className="animate-pulse" /> Watching for a detection with a real frame…
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+        {events.map((e) => (
+          <div
+            key={e.id}
+            className={`relative shrink-0 w-16 h-11 rounded overflow-hidden bg-black/40 border-2 cursor-zoom-in group ${TYPE_BOX_COLOR[e.event_type] ?? "border-control-700"}`}
+            onClick={() => setEnlarged(e)}
+            title={`${e.event_type} · ${(e.confidence * 100).toFixed(0)}% · click to enlarge`}
+          >
+            <img
+              src={`${API_BASE}/api/v1/analytics/events/${e.id}/evidence`}
+              alt={e.event_type}
+              loading="lazy"
+              className="w-full h-full object-cover"
+            />
+            <ExpandHint />
+          </div>
+        ))}
+      </div>
+      {enlarged && (
+        <Lightbox
+          src={`${API_BASE}/api/v1/analytics/events/${enlarged.id}/evidence`}
+          alt={enlarged.event_type}
+          caption={`${enlarged.event_type} · ${(enlarged.confidence * 100).toFixed(0)}% · ${formatDateTime(enlarged.timestamp)}`}
+          onClose={() => setEnlarged(null)}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * The live monitoring view for one job: the ACTUAL camera footage (real HLS,
+ * same decode path as Live View) for every camera it's watching, each paired
+ * with that camera's real-time detection feed. This is what makes "Start
+ * Monitoring" visibly do something — before this, the only feedback was a
+ * one-line frame counter.
+ */
+function JobMonitor({ job, cameras, clock }: { job: Job; cameras: Camera[]; clock: Date }) {
+  const running = job.status === "running";
+  const jobCams = job.camera_ids
+    .map((id) => cameras.find((c) => c.id === id))
+    .filter((c): c is Camera => Boolean(c));
+
+  return (
+    <div
+      className={`rounded-xl border p-3 transition-all ${
+        running ? "border-emerald-500/50 bg-emerald-500/[0.03] shadow-[0_0_0_1px_rgba(16,185,129,0.15)]" : "border-control-800 bg-control-850"
+      }`}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+          {running && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+          {job.mode === "face" ? <UserSearch size={12} /> : <Car size={12} />}
+          {job.mode === "face" ? `Person watchlist #${job.target_entry_id}` : `Plate ${job.plate}`}
+          <span className={`badge ${running ? "badge-low" : "bg-slate-500/15 text-slate-400"}`}>{job.status}</span>
+        </div>
+      </div>
+
+      {!running ? (
+        // Stopped job: a plain summary, no live tiles — rendering real HLS
+        // video for every past job (not just the running one) was itself a
+        // bug caught here: it fires a burst of simultaneous cold Sentinel
+        // fetches for cameras nobody is currently watching, which is exactly
+        // the kind of load that trips Cloudflare's per-IP throttling.
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+          {job.cameras.map((c) => (
+            <div key={c.camera_id} className="text-[10px] text-slate-500 font-mono">
+              cam {c.camera_id}: {c.frames_processed}f
+              {job.mode === "face" && `, ${c.faces_matched} match${c.faces_matched === 1 ? "" : "es"}`}
+              {job.mode === "plate" && c.anpr_stats.pushed ? `, ${c.anpr_stats.pushed} plate(s)` : ""}
+            </div>
+          ))}
+        </div>
+      ) : jobCams.length === 0 ? (
+        <div className="text-[11px] text-slate-600 flex items-center gap-1.5 py-2">
+          <ImageOff size={12} /> None of this job's cameras are in the registry yet — frame counts only.
+        </div>
+      ) : (
+        <div className={`grid gap-2 ${jobCams.length > 2 ? "grid-cols-2 md:grid-cols-3" : "grid-cols-1 md:grid-cols-2"}`}>
+          {jobCams.map((cam, i) => {
+            const stat = job.cameras.find((c) => c.camera_id === cam.id);
+            return (
+              <div key={cam.id} className="space-y-1">
+                <div className="relative rounded-lg overflow-hidden border border-control-800/60" style={{ aspectRatio: "16/9" }}>
+                  <StreamTile camera={cam} clock={clock} proxyUrl={proxyHlsUrl(cam)} startDelayMs={i * 250} compact />
+                </div>
+                <div className="flex items-center justify-between text-[9px] font-mono text-slate-600 px-0.5">
+                  <span>{stat?.frames_processed ?? 0} frames analyzed</span>
+                  {job.mode === "face" && <span>{stat?.faces_matched ?? 0} match{stat?.faces_matched === 1 ? "" : "es"}</span>}
+                  {job.mode === "plate" && !!stat?.anpr_stats.pushed && <span>{stat.anpr_stats.pushed} plate(s)</span>}
+                </div>
+                <DetectionFeed cameraId={cam.id} active={running} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Investigate() {
   const [health, setHealth] = useState<HealthState | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [tab, setTab] = useState<"person" | "vehicle">("person");
+  const [clock, setClock] = useState(new Date());
 
   // Wanted-person form
   const [file, setFile] = useState<File | null>(null);
@@ -122,7 +270,13 @@ export default function Investigate() {
   useEffect(() => {
     refreshHealth();
     refreshCameras();
+    refreshJobs();
     const id = setInterval(() => { refreshHealth(); refreshJobs(); }, 4000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -335,38 +489,35 @@ export default function Investigate() {
         </form>
       )}
 
-      {/* Active jobs */}
+      {/* Active jobs — real live footage + real detection frames, not a status line */}
       <div className="card p-4">
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-sm font-semibold">Active Monitoring Jobs</div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold flex items-center gap-2">
+            Live Monitoring
+            {jobs.some((j) => j.status === "running") && (
+              <span className="text-[10px] font-normal px-2 py-0.5 rounded-full border border-emerald-500/30 text-emerald-400 bg-emerald-500/10 animate-pulse">
+                ● ACTIVE
+              </span>
+            )}
+          </div>
           <a href="/alerts" className="text-xs text-orange-400/80 hover:text-orange-400 flex items-center gap-1">
             View Live Alerts <ExternalLink size={11} />
           </a>
         </div>
-        {jobs.length === 0 && <div className="text-xs text-slate-600">No monitoring jobs running.</div>}
-        <div className="space-y-2">
+        {jobs.length === 0 && (
+          <div className="text-xs text-slate-600 py-6 text-center">
+            No monitoring jobs running. Start one above — real camera footage and detections will appear here.
+          </div>
+        )}
+        <div className="space-y-3">
           {jobs.map((j) => (
-            <div key={j.job_id} className="bg-control-850 rounded-lg p-3 border border-control-800/50">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold text-slate-200">
-                  {j.mode === "face" ? <UserSearch size={12} className="inline mr-1" /> : <Car size={12} className="inline mr-1" />}
-                  {j.mode === "face" ? `Person watchlist #${j.target_entry_id}` : `Plate ${j.plate}`}
-                  <span className={`ml-2 badge ${j.status === "running" ? "badge-low" : "bg-slate-500/15 text-slate-400"}`}>{j.status}</span>
-                </div>
-                {j.status === "running" && (
+            <div key={j.job_id}>
+              <JobMonitor job={j} cameras={cameras} clock={clock} />
+              {j.status === "running" && (
+                <div className="flex justify-end mt-1.5">
                   <button className="btn-ghost text-xs" onClick={() => stopJob(j.job_id)}><Square size={11} /> Stop</button>
-                )}
-              </div>
-              <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2">
-                {j.cameras.map((c) => (
-                  <div key={c.camera_id} className="text-[10px] text-slate-500 font-mono">
-                    cam {c.camera_id}: {c.frames_processed}f
-                    {j.mode === "face" && `, ${c.faces_matched} match${c.faces_matched === 1 ? "" : "es"}`}
-                    {j.mode === "plate" && c.anpr_stats.pushed ? `, ${c.anpr_stats.pushed} plate(s)` : ""}
-                    {!c.running && <span className="text-amber-500"> (stopped)</span>}
-                  </div>
-                ))}
-              </div>
+                </div>
+              )}
             </div>
           ))}
         </div>

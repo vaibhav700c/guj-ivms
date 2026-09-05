@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
-import { CheckCheck, CheckCircle, XCircle, BellOff, RefreshCw } from "lucide-react";
+import { CheckCheck, CheckCircle, XCircle, BellOff, RefreshCw, ImageOff } from "lucide-react";
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import { useAlertStream } from "../hooks/useAlertStream";
 import InlineError from "../components/InlineError";
 import SimulatedBadge from "../components/SimulatedBadge";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
 import { useSettings } from "../store/settings";
+
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
 interface AlertItem {
   id: number; alert_type: string; severity: string;
   camera_name: string | null; detected_identifier: string | null;
   match_confidence: number | null; message: string | null;
   status: string; timestamp: string;
-  source?: string;
+  source?: string; has_evidence_image?: boolean;
 }
 
 const SEV_LEFT: Record<string, string> = {
@@ -48,6 +51,7 @@ export default function Alerts() {
   const [error, setError] = useState<string | null>(null);
   const [actioning, setActioning] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [enlarged, setEnlarged] = useState<AlertItem | null>(null);
 
   // Shared /ws/alerts connection — Layout owns the socket, this page just
   // reads live state and reacts to new messages. No second socket is opened.
@@ -167,6 +171,25 @@ export default function Alerts() {
           .map((a) => (
           <div key={a.id}
             className={`card p-0 overflow-hidden flex animate-slide-in-up ${SEV_LEFT[a.severity] ?? ""}`}>
+            {a.has_evidence_image ? (
+              <div
+                className="relative w-24 shrink-0 bg-black/40 cursor-zoom-in group"
+                onClick={() => setEnlarged(a)}
+                title="Click to enlarge"
+              >
+                <img
+                  src={`${API_BASE}/api/v1/alerts/${a.id}/evidence`}
+                  alt="Alert evidence frame"
+                  loading="lazy"
+                  className="w-full h-full object-cover"
+                />
+                <ExpandHint />
+              </div>
+            ) : (
+              <div className="w-24 shrink-0 bg-control-850 flex items-center justify-center text-slate-700">
+                <ImageOff size={16} />
+              </div>
+            )}
             <div className="flex-1 p-4">
               <div className="flex items-center gap-2 flex-wrap mb-1.5">
                 <span className={`badge text-[10px] ${STATUS_BADGE[a.status] ?? ""}`}>
@@ -243,6 +266,15 @@ export default function Alerts() {
           </div>
         )}
       </div>
+
+      {enlarged && (
+        <Lightbox
+          src={`${API_BASE}/api/v1/alerts/${enlarged.id}/evidence`}
+          alt="Alert evidence frame"
+          caption={`${enlarged.detected_identifier ?? enlarged.alert_type} · ${enlarged.camera_name ?? "—"} · ${formatDateTime(enlarged.timestamp)}`}
+          onClose={() => setEnlarged(null)}
+        />
+      )}
     </div>
   );
 }
