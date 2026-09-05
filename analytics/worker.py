@@ -150,7 +150,34 @@ def normalize_plate(text: str) -> str:
 # a blind whole-string replace (a blind replace would mangle valid digits/
 # letters that happen to share a lookalike).
 
-PLATE_PATTERN = re.compile(r'^[A-Z]{2}\d{2}[A-Z]{1,3}\d{1,4}$')
+# Modern Indian plates carry exactly FOUR trailing digits, and the series never
+# uses I, O or Q — those glyphs are deliberately excluded so they cannot be
+# confused with 1 and 0. Both rules were previously missing (the pattern ended
+# `\d{1,4}` and allowed any letter), and real live output shows why that matters:
+# a single daylight run on cam06 emitted GJ75T21, GJ32R03, GJ13D922, GJ12I394,
+# GJ03O965 and GJ03O935 as "format-valid" detections. Every one is impossible —
+# two- and three-digit tails, an I-series, two O-series, and GJ-75 (Gujarat's
+# districts stop at 38). Only GJ11T5967 and GJ11T5352 survive these rules, and
+# those are corroborated: cam06 is Timbavadi Gate, Junagadh, and GJ-11 is the
+# Junagadh RTO code.
+#
+# Precision is worth far more than recall here. A missed plate is a gap; a
+# confidently-wrong plate shown to police is a false lead attached to a real
+# vehicle, and is exactly the failure this project must not ship.
+PLATE_PATTERN = re.compile(r'^[A-Z]{2}\d{2}[A-HJ-NP-Z]{1,3}\d{4}$')
+
+# Highest assigned RTO district per state code. An OCR misread lands on an
+# unassigned district far more often than a real vehicle does.
+MAX_RTO_DISTRICT = {"GJ": 38}
+_DEFAULT_MAX_RTO_DISTRICT = 99
+
+
+def _plate_district_is_real(plate: str) -> bool:
+    """Reject a district number the issuing state has never assigned."""
+    state, district = plate[:2], plate[2:4]
+    if not district.isdigit() or district == "00":
+        return False
+    return int(district) <= MAX_RTO_DISTRICT.get(state, _DEFAULT_MAX_RTO_DISTRICT)
 
 # Real Indian state/UT RTO codes. Vehicles from any state legitimately pass
 # through Gujarat cameras, so this is NOT restricted to GJ — but it does
@@ -194,7 +221,7 @@ def _clean_plate_text(raw: str) -> str | None:
 
     best: tuple[tuple[int, int], str] | None = None
     for series_len in (1, 2, 3):
-        for number_len in (1, 2, 3, 4):
+        for number_len in (4,):
             if 4 + series_len + number_len != len(text):
                 continue
             slots = ([False, False] + [True, True] +
@@ -218,7 +245,9 @@ def _clean_plate_text(raw: str) -> str | None:
     if best is None:
         return None
     corrected = best[1]
-    return corrected if PLATE_PATTERN.match(corrected) else None
+    if not PLATE_PATTERN.match(corrected):
+        return None
+    return corrected if _plate_district_is_real(corrected) else None
 
 
 class _PlateVoter:
