@@ -1,49 +1,86 @@
 # Gujarat IVMS — Integrated Video Management & Analytics Platform
 
-> Gujarat Police hackathon build · **Hybrid architecture (Model 1 + 2 + 3 + selective 4)** · 100% open-source · zero vendor lock-in
-
-A working end-to-end implementation of the project's implementation plan (`plan.md`,
-kept out of version control because the companion integration notes carry live
-camera-grid credentials):
+> Gujarat Police hackathon build · hybrid architecture (Model 1 + 2 + 3 + selective 4) · 100% open-source
 
 ```
-Camera → Edge/Regional Analytics Node → Metadata + Alerts → Central Platform
-        (ANPR, detection, tracking)    (NOT raw video)     (correlation, search, GIS, dashboards)
+Camera → Edge Analytics (YOLOv8 + plate OCR + ArcFace) → Metadata + Alerts → Central Platform
+                                                          (NOT raw video)     (correlation, search, GIS)
 ```
 
-Raw video stays with departmental systems. Only structured metadata flows to the center — the guiding principle: **"analytics at the edge, correlation at the center."**
+Raw video never leaves the edge. Only structured metadata — plate strings, bounding
+boxes, confidences, face embeddings — reaches the central platform. That's what makes
+an 80,000-camera target bandwidth-plausible, and it's the one rule every code path here
+follows: never ship frames to the backend.
 
-## What's implemented
+The full spec is `plan.md` at the repo root — deliberately gitignored, along with
+`integration_camera.txt` (live camera-grid credentials), because this repository is
+public. If either is missing from your checkout, ask for it rather than guessing; this
+README and `docs/` describe what's actually built, which is the reliable source for
+current behavior.
 
-| Layer | Plan model | Where |
-|---|---|---|
-| Camera Registry + GIS (30 live Sentinel Grid cameras with real coordinates) | Model 1 | `backend/app/routes/cameras.py`, frontend **Camera Registry** + **GIS Map** pages |
-| Unified viewing grid (2×2 / 3×3 / 4×4, OSD overlays, MediaMTX-ready) | Model 2 | frontend **Live View** page |
-| Federation ingest API for edge/regional nodes (adapter contract + API-key) | Model 3 | `POST /api/v1/ingest/anpr`, `POST /api/v1/ingest/detection` |
-| Central analytics: ANPR events, detections, tiering (A/B/C), VAHAN-like registry | Model 4 | `backend/app/routes/{analytics,vehicles}.py` |
-| Watchlist correlation engine → real-time WebSocket alerts | Model 4 | `backend/app/alert_engine.py`, **Live Alerts** page (ack/resolve workflow + sound) |
-| Face-recognition correlation for wanted/missing persons (Tier A) | plan §6 | `backend/app/alert_engine.py` → `watchlist_person` alerts |
-| **Investigate** — upload a wanted-person photo or enter a plate, pick camera(s), run real YOLOv8/InsightFace/plate-OCR against them live | plan §6/§7 | frontend **Investigate** page → `analytics/control_server.py` (local-only; see below) |
-| Vehicle search & journey reconstruction (haversine legs, implied speeds, map replay, probable OCR matches) | plan §7 / §20.2 | **Vehicle Search** page |
-| Camera health monitoring (time-series health log, feeds/status) | plan §9.1 / §13 | `GET /cameras/{id}/health-log`, `/feeds/status` |
-| GIS coverage + gap analysis report | plan §9.2 / §13 | `GET /cameras/geo/coverage`, `/cameras/gap-analysis` |
-| Federation connector registry | plan §11.2 | `GET /system/adapters` |
-| Live snapshot capture (`GET /feeds/{id}/snapshot`, ffmpeg over live HLS) | plan §13 | `backend/app/routes/feeds.py` |
-| Watchlist bulk import (JSON/CSV) + PDF report exports | plan §13 / §20 | `POST /watchlist/bulk-import`, `GET /reports/{kind}.pdf` |
-| Per-camera analytics WebSocket (`/ws/analytics/{camera_id}`) | plan §13 | `backend/app/routes/ws.py` |
-| Backend test suite (24 e2e tests: ingest→alert→resolve, journey, PDF, RBAC, audit trail, rate limiting) | robustness | `backend/tests/` |
-| Demo simulator (edge-node emulation) — makes the deployed product live-demoable | plan §20 | `backend/app/simulator.py` |
-| JWT + RBAC auth, PBKDF2 password hashing, user management | plan §17 | `backend/app/security.py`, `routes/users.py` |
+## Real data only — how this is actually enforced
 
-## Deliverables (plan §21)
+Every event this platform stores carries a `source` field: `"edge_worker"` for a
+genuine detection from the real CV pipeline, `"simulator"` for the bundled demo
+generator. This isn't a cosmetic label — it's enforced at write time (the ingest API
+hardcodes it server-side; a POST body can never spoof it), it's filterable on every
+list endpoint (`?source=edge_worker`), and the frontend's **"Real detections only"**
+toggle in the top bar — **on by default** — hides everything else. A simulated row that
+does slip through a filtered view still can't pass as real: it carries a visible
+`SIMULATED` badge everywhere it appears.
 
-- **HLD** — [docs/HLD.md](docs/HLD.md)
-- **Solution presentation (20-slide PDF)** — [docs/PRESENTATION.pdf](docs/PRESENTATION.pdf) (regenerate: `python docs/generate_presentation.py`)
-- **Demo script (2–3 min, plan §20.2 test scenario)** — [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)
-- **Deployment guide** — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-- **API reference** — [docs/API.md](docs/API.md) · live Swagger at `/docs`
-- **Security architecture** — [docs/SECURITY.md](docs/SECURITY.md)
-- **This repository** with full code + docker-compose + deploy configs
+The demo simulator itself defaults to **off** (`SIMULATOR_AUTO_START=false`), and a
+second guard refuses to auto-start it at all when `ENVIRONMENT=production`, even if
+that variable drifts back to `true` on the hosting platform — this was a real
+production incident during development (see `git log --grep=simulator`), not a
+hypothetical.
+
+This matters because it's the actual failure mode this project fought hardest: a
+hackathon demo is trivial to fake with a random-data generator, and a fake result
+that's indistinguishable from a real one is worse than an honest "not implemented."
+Nothing in this README claims a capability that wasn't independently verified against
+the real Sentinel Grid feeds.
+
+## What's real, and what's honestly still hard
+
+**Genuinely working, verified against live camera footage, not simulated:**
+
+- Live HLS video from 30 real Sentinel Grid cameras (AES-128 decrypted client-side)
+- Real-time YOLOv8 person/vehicle/face detection, with the actual bounding box
+  drawn by OpenCV directly into the evidence JPEG — not a CSS overlay computed
+  after the fact, the box is baked into the pixels the model actually saw
+- Real license-plate OCR with Indian-format validation (RTO district table, 4-digit
+  tail, no ambiguous I/O series letters) and multi-read voting before anything is
+  accepted — corroborated example: `GJ11T5967` on cam06 (Timbavadi Gate, Junagadh),
+  a school bus lettered "Amrut Institute Junagadh" — GJ-11 genuinely is the
+  Junagadh RTO code
+- Real ArcFace face embeddings + cosine-similarity re-identification across cameras
+- Cross-camera vehicle re-identification via HSV appearance histograms, for the
+  cameras where plate OCR is confirmed physically impossible (see below)
+- GIS coordinates and journey reconstruction driven entirely by real detection
+  events joined to the real camera registry — no fabricated routes or coordinates
+- Per-camera CV capability verification: an automated, isolated run of the real
+  pipeline against one camera, recording exactly what it found (frame count,
+  detections by type, plates read, a real representative evidence photo) —
+  see **Camera Registry** → any camera → "Verified CV Capability"
+
+**Measured, not assumed, and honestly reported:**
+
+- Plate OCR accuracy is fundamentally limited by camera resolution and lighting on
+  most of the 30 feeds. 11 of 30 cameras were reviewed frame-by-frame by a human
+  operator and confirmed physically incapable of a legible plate read (headlight
+  glare, distance, motion blur, B&W night mode) — those cameras skip ANPR entirely
+  rather than let an OCR model hallucinate on noise it can't resolve. The 9
+  cameras confirmed plate-legible do produce real, corroborated reads; the rest of
+  the grid falls back to appearance-based vehicle correlation.
+- Running many camera pipelines concurrently on one machine measurably degrades
+  each one's real frame rate — a 30-camera parallel sweep dropped effective
+  throughput to 5-14× below target on a single laptop, which is a genuine hardware
+  ceiling, not a bug, and is exactly why the edge worker is designed to scale
+  horizontally across nodes rather than vertically on one box.
+- Face re-identification requires the same enrolled person to physically re-appear
+  in frame; this is inherently probabilistic on wide-angle traffic cameras and
+  isn't claimed to work on demand.
 
 ## Quick start (zero-config dev)
 
@@ -52,42 +89,68 @@ Raw video stays with departmental systems. Only structured metadata flows to the
 cd backend
 python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/uvicorn app.main:app --port 8000
-# Seeded automatically: 30 Sentinel Grid cameras, watchlist, VAHAN records, users
-# Demo simulator is OFF by default (SIMULATOR_AUTO_START=false) — the dashboard
-# starts empty until a real edge worker ingests events, or you deliberately turn
-# the simulator on (POST /api/v1/simulator/start, or SIMULATOR_AUTO_START=true)
-# for a live demo. Every row it writes is stamped source="simulator" either way.
+# Auto-seeds: 30 real Sentinel Grid cameras (real coordinates), watchlist, VAHAN
+# records, users. Simulator is OFF by default — the dashboard starts empty until
+# a real edge worker ingests events, or you deliberately POST /api/v1/simulator/start.
 
-# Run the test suite (isolated SQLite DB, deterministic — simulator disabled)
-.venv/bin/python -m pytest tests/ -v
+.venv/bin/python -m pytest tests/ -v   # 24 tests, isolated SQLite, simulator disabled
 
 # Frontend
 cd frontend
 npm install && npm run dev        # http://localhost:5173
+npx tsc --noEmit && npm run build  # both must pass before committing
 ```
 
-Login: `admin / admin123` (or any visit — demo mode auto-authenticates when `REQUIRE_AUTH=false`).
+Login: `admin` / `admin123` (or just visit — `REQUIRE_AUTH=false` auto-authenticates).
 
-## Investigate — wanted-person photo search & live plate watch (local only)
+**First load of any route is slow in dev mode** (a few seconds) — that's Vite compiling
+that route's modules on demand, a one-time cost per file per dev-server session, not a
+network or backend problem. `npm run build && npm run preview` skips it entirely
+(confirmed under 2s cold in both modes) and is what's actually deployed to Vercel.
 
-The real CV stack (YOLOv8 + InsightFace ArcFace + plate OCR, ~2GB RAM) never runs on
-Render's 512MB free tier — it runs on your own machine, from the same `analytics/`
-worker code the edge pipeline already uses:
+## The real CV pipeline
 
 ```bash
 cd analytics
-python -m venv .venv && .venv/bin/pip install -r requirements.txt   # pulls insightface (~330MB models, first run)
+python -m venv .venv && .venv/bin/pip install -r requirements.txt   # pulls torch, insightface (~330MB first run)
+export SENTINEL_EMAIL=... SENTINEL_PASSWORD=...   # both required — see Traps below
+
+# Sanity check the video source with zero ML involved
+.venv/bin/python worker.py test-rtsp --camera 6 --out /tmp/f.jpg
+
+# The always-on edge worker (posts to a running backend)
+timeout 150 .venv/bin/python worker.py run        # ALWAYS bound it; loops forever
+
+# The Investigate page's on-demand bridge — upload a photo or enter a plate,
+# pick cameras, watch real detections happen (needs the backend running)
 .venv/bin/uvicorn control_server:app --port 8800
+
+# Verify one camera's real capability in isolation, no CPU contention with
+# anything else — records a CameraCapabilityRun the UI can show
+.venv/bin/python run_capability_audit.py --cameras 4,6,12
+
+# Capture against many cameras with NEITHER the backend nor control_server
+# running — durable local SQLite instead, true concurrent capture safe since
+# there's no live UI to protect from CPU contention. Replay it in afterward:
+.venv/bin/python offline_capture.py --cameras all --duration 300 --parallel
+.venv/bin/python replay_offline_capture.py   # once the backend is back up
 ```
 
-Then open the **Investigate** page in the app (works against the deployed
-`https://guj-ivms.vercel.app` too — `http://localhost:8800` fetches from an HTTPS page
-are not blocked as mixed content, since `localhost` is a spec'd trustworthy origin).
-Upload a reference photo (or enter a plate), pick which camera(s) to run against —
-including the bundled `analytics/demo_assets/*.mp4` clips if you don't have a suitable
-live face/plate on the Sentinel grid — and start monitoring. Matches raise real alerts
-(camera, timestamp, confidence, the actual detection frame) on **Live Alerts** and the
-**GIS Map**, same as the always-on edge worker.
+See [`docs/ANALYTICS.md`](docs/ANALYTICS.md) for the model stack, degradation
+behavior, and per-camera capability config.
+
+## Investigate — wanted-person photo search & live plate watch
+
+The real CV stack (YOLOv8 + InsightFace ArcFace + plate OCR, ~2GB RAM) never runs on
+Render's 512MB free tier — it runs on your own machine, driving the same
+`analytics/` worker code the always-on edge pipeline uses. Open the **Investigate**
+page (works against the deployed site too — `localhost:8800` fetches from an HTTPS
+page aren't blocked as mixed content since `localhost` is a spec'd trustworthy origin),
+upload a reference photo or enter a plate, pick real cameras, and start monitoring.
+The page shows the actual live camera footage plus a live-updating strip of real
+annotated detection frames while it runs — not a status line, actual video and actual
+evidence images. Matches raise real alerts (camera, timestamp, confidence, the real
+detection frame) on **Live Alerts** and the **GIS Map**.
 
 ## Full stack (Postgres + PostGIS + Redis + MinIO + MediaMTX)
 
@@ -97,8 +160,6 @@ docker compose up --build
 
 ## Cloud deployment (already wired)
 
-**🔴 Live URLs**
-
 | Component | URL |
 |---|---|
 | Control Room UI (Vercel) | **https://guj-ivms.vercel.app** |
@@ -106,50 +167,70 @@ docker compose up --build
 | Swagger docs | https://guj-ivms-api.onrender.com/docs |
 | WebSocket live alerts | wss://guj-ivms-api.onrender.com/ws/alerts |
 
-Deployed via Render (Docker backend + managed PostgreSQL, `render.yaml` Blueprint
-spec in repo) and Vercel (`frontend/vercel.json`, Vite). First boot auto-seeds
-the 30 Sentinel Grid cameras, watchlist, VAHAN records and users. The demo
-simulator (`SIMULATOR_AUTO_START=false`) is off by default — start it explicitly
-from the Dashboard or `POST /api/v1/simulator/start` for a live-events demo;
-every row it produces is stamped `source="simulator"` and is filterable/badged
-as such everywhere in the UI and API.
+Both platforms auto-deploy on push to `master`. First boot auto-seeds the 30 real
+Sentinel Grid cameras, watchlist, VAHAN records, and users.
 
-> **Deploying this yourself:** apply `render.yaml` as a Render **Blueprint** rather
-> than creating the service by hand — otherwise none of its environment variables
-> reach the container and the API silently falls back to an ephemeral SQLite file
-> that is wiped on every restart. `SENTINEL_EMAIL` **and** `SENTINEL_PASSWORD` are
-> both required; the grid's sign-in form rejects a password on its own, and every
-> live-video and snapshot endpoint returns 502/503 without them.
+> **Deploying this yourself:** apply `render.yaml` as a Render **Blueprint**, not a
+> hand-created service — otherwise none of its environment variables reach the
+> container and the API silently falls back to an ephemeral SQLite file wiped on every
+> restart. `SENTINEL_EMAIL` **and** `SENTINEL_PASSWORD` are both required — the grid's
+> sign-in form rejects a password-only POST with an HTTP 200 and no cookie, so a naive
+> status check reads that as success. Setting env vars on Render does **not** itself
+> trigger a redeploy.
 
 ## API surface (v1)
 
 ```
 POST /api/v1/auth/login                 GET  /api/v1/auth/me
-GET/POST/PATCH/DELETE /api/v1/cameras   GET  /api/v1/cameras/stats
+GET/POST/PATCH/DELETE /api/v1/cameras   GET  /api/v1/cameras/{id}/capability-runs
 GET/POST/PATCH/DELETE /api/v1/watchlist
 GET  /api/v1/alerts                     PATCH /api/v1/alerts/{id}/status
-GET  /api/v1/analytics/overview         GET  /api/v1/analytics/events/timeline
-GET  /api/v1/vehicles/search/{plate}    GET  /api/v1/vehicles/registry/{plate}
+GET  /api/v1/analytics/overview         GET  /api/v1/analytics/events?source=edge_worker
+GET  /api/v1/vehicles/search/{plate}    GET  /api/v1/vehicles/journey/{plate}
 GET  /api/v1/vehicles/traffic/*         GET  /api/v1/reports/*.csv
 POST /api/v1/ingest/anpr                POST /api/v1/ingest/detection
 GET  /api/v1/simulator/status           POST /api/v1/simulator/{start,stop}
 WS   /ws/alerts                         GET  /health
 ```
 
-Interactive docs: `/docs` (Swagger UI).
+Interactive docs: `/docs` (Swagger UI). Full reference: [`docs/API.md`](docs/API.md).
 
-## Production hardening checklist
+## Traps that have already cost real debugging time
 
-- Set `REQUIRE_AUTH=true` + strong `SECRET_KEY` (Render `generateValue`).
-- `SIMULATOR_AUTO_START` now defaults to `false` — every ANPR/detection/alert row is stamped
-  `source` ("edge_worker" vs "simulator") regardless, but the honest default is real data only.
-  Set `SIMULATOR_AUTO_START=true` deliberately for a live demo without cameras; keep `INGEST_API_KEY`
-  set once real ingest nodes are connected.
-- Redis (`REDIS_URL`) enables cross-replica WebSocket fan-out for scaling beyond one instance.
-- Raw video never transits this API — object store (MinIO/S3) references only (`snapshot_ref`).
+- **`SENTINEL_EMAIL` and `SENTINEL_PASSWORD` are both required**, everywhere the
+  Sentinel Grid is touched (HLS proxy, RTSP worker, control_server). Missing either
+  silently 503s every live-video/snapshot/detection path.
+- **RTSP uses HTTP Basic auth** — percent-encode credentials into the URL userinfo.
+- **The plate OCR model is single-channel** — a 3-channel BGR crop fails ONNX shape
+  validation on the channel axis and silently disables ANPR.
+- **The upstream CDN is Cloudflare-fronted and rate-limits by source IP.** Do not
+  load-test it. The backend proxies every viewer through one address; playlists and
+  segments are cached, concurrent identical fetches are coalesced, and a background
+  warmer keeps the default live-grid cameras pre-fetched so a normal page load never
+  pays the upstream's own ~4-25 KB/s cold-fetch cost.
+- **A threshold expressed in raw sample count silently changes meaning if the sample
+  rate changes** — caught live when raising the CV worker's FPS cut a static-background
+  filter's effective grace period in half. Anything gating on "N occurrences in a
+  window" should gate on real elapsed time instead.
+- **Python's `threading.Thread` reserves a private `_stop()` method** — naming your own
+  instance attribute `self._stop` silently shadows it and only crashes inside
+  `Thread.join()`, which may not be called on every code path that uses the thread.
+- Full list, including Render/Postgres-specific traps: see `CLAUDE.md`.
 
 ## Tech stack (all free / open-source)
 
-FastAPI · SQLAlchemy 2 · PostgreSQL (+PostGIS/TimescaleDB in full stack) · Redis · SQLite fallback · React 18 + Vite + TypeScript · Tailwind CSS · Leaflet + OpenStreetMap · Recharts · WebSocket · Docker Compose · MediaMTX · MinIO.
+FastAPI · SQLAlchemy 2 · PostgreSQL (+PostGIS/TimescaleDB in the full stack) · Redis ·
+SQLite fallback · React 18 + Vite + TypeScript · Tailwind CSS · Leaflet + OpenStreetMap ·
+Recharts · WebSocket · YOLOv8 (ultralytics) · ByteTrack (supervision) · fast-plate-ocr ·
+InsightFace (buffalo_l / ArcFace) · Docker Compose · MediaMTX · MinIO.
 
-See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for step-by-step deploy instructions.
+## Deliverables
+
+- **HLD** — [docs/HLD.md](docs/HLD.md)
+- **Analytics pipeline** — [docs/ANALYTICS.md](docs/ANALYTICS.md)
+- **Demo script** — [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)
+- **Deployment guide** — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- **API reference** — [docs/API.md](docs/API.md) · live Swagger at `/docs`
+- **Security architecture** — [docs/SECURITY.md](docs/SECURITY.md)
+- **Solution presentation** — [docs/PRESENTATION.pdf](docs/PRESENTATION.pdf)
+  (regenerate: `python docs/generate_presentation.py`)
