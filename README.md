@@ -2,15 +2,28 @@
 
 > Gujarat Police hackathon build · hybrid architecture (Model 1 + 2 + 3 + selective 4) · 100% open-source
 
-```
-Camera → Edge Analytics (YOLOv8 + plate OCR + ArcFace) → Metadata + Alerts → Central Platform
-                                                          (NOT raw video)     (correlation, search, GIS)
+```mermaid
+flowchart LR
+    CAM[("Sentinel Grid<br/>30 real CCTV cameras")]
+    EDGE["Edge Analytics<br/>YOLOv8 · ByteTrack · plate OCR · ArcFace<br/>(your own machine — never Render)"]
+    API["Central Platform — FastAPI on Render<br/>correlation · GIS · search · dashboards"]
+    UI["Control Room — React on Vercel"]
+
+    CAM -->|RTSP| EDGE
+    EDGE -->|"metadata + alerts only<br/>(never raw video)"| API
+    API -->|REST + WebSocket| UI
+
+    style CAM fill:#0d1a2e,stroke:#f97316,color:#e2e8f0
+    style EDGE fill:#0d1a2e,stroke:#f97316,color:#e2e8f0
+    style API fill:#0d1a2e,stroke:#06b6d4,color:#e2e8f0
+    style UI fill:#0d1a2e,stroke:#10b981,color:#e2e8f0
 ```
 
 Raw video never leaves the edge. Only structured metadata — plate strings, bounding
 boxes, confidences, face embeddings — reaches the central platform. That's what makes
 an 80,000-camera target bandwidth-plausible, and it's the one rule every code path here
-follows: never ship frames to the backend.
+follows: never ship frames to the backend. Full component, data-flow and deployment
+diagrams: [`docs/HLD.md`](docs/HLD.md).
 
 The full spec is `plan.md` at the repo root — deliberately gitignored, along with
 `integration_camera.txt` (live camera-grid credentials), because this repository is
