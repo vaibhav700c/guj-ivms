@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # public demo) should show only what the real pipeline actually detected
     # unless someone deliberately opts into the fabricated data for a live demo.
     SIMULATOR_AUTO_START: bool = False
+    # Second, explicit opt-in required to auto-start the simulator when
+    # ENVIRONMENT=production — see the guard in main.py's lifespan.
+    SIMULATOR_ALLOW_IN_PRODUCTION: bool = False
     SIMULATOR_INTERVAL_SECONDS: float = 2.0
 
     # Seed

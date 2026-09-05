@@ -110,8 +110,23 @@ async def lifespan(app: FastAPI):
         finally:
             db.close()
     await event_bus.connect_redis(settings.REDIS_URL)
+    # The simulator fabricates ANPR/detection events. Auto-starting it in a
+    # production deployment means the public demo silently serves invented data,
+    # so a stale or hand-set SIMULATOR_AUTO_START must not be able to cause that
+    # on its own — this was observed live: render.yaml declared "false" while the
+    # deployed service reported simulator_auto_start=true and every event on the
+    # public API came back source="simulator". Deliberately running it against
+    # production still works, but takes a second, explicit opt-in (or the
+    # /simulator/start endpoint).
     if settings.SIMULATOR_AUTO_START:
-        await simulator.start()
+        if settings.ENVIRONMENT == "production" and not settings.SIMULATOR_ALLOW_IN_PRODUCTION:
+            logger.warning(
+                "SIMULATOR_AUTO_START is set but ENVIRONMENT=production — refusing to "
+                "auto-start fabricated event generation. Set SIMULATOR_ALLOW_IN_PRODUCTION=true "
+                "or POST /api/v1/simulator/start to run it deliberately."
+            )
+        else:
+            await simulator.start()
     logger.info("%s v%s ready (env=%s)", settings.APP_NAME, settings.VERSION, settings.ENVIRONMENT)
     yield
     await simulator.stop()

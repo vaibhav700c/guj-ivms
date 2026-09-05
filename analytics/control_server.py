@@ -371,7 +371,8 @@ def monitor_stop(job_id: str):
     job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Unknown job_id")
-    return _stop_job(job_id) or job
+    result = _stop_job(job_id) or job
+    return {k: v for k, v in result.items() if k != "final_camera_stats"}
 
 
 @app.get("/api/local/monitor/status")

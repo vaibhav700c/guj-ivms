@@ -76,6 +76,9 @@ PLATE_MIN_WIDTH_PX = int(os.environ.get("PLATE_MIN_WIDTH_PX", "60"))  # plan §4
 PLATE_CONF_HIGH = float(os.environ.get("PLATE_CONF_HIGH", "0.7"))     # >= this → high-confidence
 PLATE_MIN_VOTES = int(os.environ.get("PLATE_MIN_VOTES", "2"))         # corroborating reads required
 PLATE_VOTE_WINDOW_S = float(os.environ.get("PLATE_VOTE_WINDOW_S", "5.0"))
+PLATE_STATIC_WINDOW_S = float(os.environ.get("PLATE_STATIC_WINDOW_S", "20.0"))
+PLATE_STATIC_MIN_REPEATS = int(os.environ.get("PLATE_STATIC_MIN_REPEATS", "4"))
+PLATE_STATIC_GRID_PX = int(os.environ.get("PLATE_STATIC_GRID_PX", "12"))
 FACE_MATCH_THRESHOLD = float(os.environ.get("FACE_MATCH_THRESHOLD", "0.45"))
 FACE_MIN_DETECT_CONF = float(os.environ.get("FACE_MIN_DETECT_CONF", "0.5"))
 PUSH_DETECTION_EVERY_S = float(os.environ.get("PUSH_DETECTION_EVERY_S", "10"))
@@ -89,6 +92,43 @@ LOCAL_SNAPSHOT_DIR = os.environ.get("LOCAL_SNAPSHOT_DIR", "")
 LOCAL_SNAPSHOT_BASE_URL = os.environ.get(
     "LOCAL_SNAPSHOT_BASE_URL", "http://localhost:8800/local-frames"
 ).rstrip("/")
+
+# Diagnostic-only, off by default: when set, every raw plate-OCR read (accepted
+# AND rejected) saves its crop + logs the raw string, per-char confidences and
+# crop width, capped at PLATE_DEBUG_MAX samples total across all cameras. This
+# is how "rejected_format" was distinguished from a real near-miss vs. noise —
+# see CLAUDE.md "Known limitation: live ANPR".
+PLATE_DEBUG_DIR = os.environ.get("PLATE_DEBUG_DIR", "")
+PLATE_DEBUG_MAX = int(os.environ.get("PLATE_DEBUG_MAX", "40"))
+_plate_debug_lock = threading.Lock()
+_plate_debug_count = 0
+
+
+def plate_debug_sample(camera_id: int, crop_gray: np.ndarray, raw_text: str,
+                        char_probs, ocr_conf: float, det_conf: float,
+                        corrected: str | None, width_px: int) -> None:
+    """Best-effort diagnostic dump of one raw OCR read — see PLATE_DEBUG_DIR."""
+    global _plate_debug_count
+    if not PLATE_DEBUG_DIR:
+        return
+    with _plate_debug_lock:
+        if _plate_debug_count >= PLATE_DEBUG_MAX:
+            return
+        _plate_debug_count += 1
+        idx = _plate_debug_count
+    try:
+        os.makedirs(PLATE_DEBUG_DIR, exist_ok=True)
+        tag = f"{idx:03d}_{external_id(camera_id)}_w{width_px}"
+        cv2.imwrite(os.path.join(PLATE_DEBUG_DIR, f"{tag}.jpg"), crop_gray)
+        probs = [round(float(p), 3) for p in char_probs] if char_probs is not None else None
+        with open(os.path.join(PLATE_DEBUG_DIR, "log.jsonl"), "a") as f:
+            f.write(__import__("json").dumps({
+                "idx": idx, "camera": external_id(camera_id), "width_px": width_px,
+                "raw_text": raw_text, "char_probs": probs, "ocr_conf": round(ocr_conf, 3),
+                "det_conf": round(det_conf, 3), "corrected": corrected,
+            }) + "\n")
+    except Exception:
+        log.exception("plate_debug_sample failed")
 
 # COCO classes: 2=car 3=motorcycle 5=bus 7=truck ; 0=person
 VEHICLE_CLASSES = {2, 3, 5, 7}
@@ -600,6 +640,18 @@ class CameraPipeline(threading.Thread):
         self._last_plate_push: dict[str, float] = {}   # normalized plate → ts
         self._last_track_push: dict[str, float] = {}   # track key → ts
         self._last_face_pass = 0.0
+        # Static-region false-positive guard (measured need, not a guess): the
+        # plate DETECTOR (not the OCR) repeatedly fires on fixed background
+        # text that happens to look plate-shaped — on-screen date/time overlay
+        # digits, roadside "CENTER"-style signage — because that text never
+        # moves frame to frame while a real plate (on a moving/arriving
+        # vehicle) does. Measured on cam17: a signboard read as "CENTER" (OCR
+        # conf 0.82-0.86, format-invalid) fired on ~30+ consecutive sampled
+        # frames at an unchanged bbox, accounting for most of that camera's
+        # rejected_format volume — a detection-stage false positive, not an
+        # OCR failure. A box recurring at ~the same location repeatedly within
+        # a short window is background, not a plate; skip OCR on it entirely.
+        self._plate_box_hits: dict[tuple[int, int, int, int], list[float]] = {}
         self._backoff = 2.0
         self._plate_voter = _PlateVoter()
         self.anpr_stats: dict[str, int] = defaultdict(int)
@@ -741,6 +793,23 @@ class CameraPipeline(threading.Thread):
         if best_cls is None:
             return None
         return VEHICLE_TYPE_BY_CLASS.get(best_cls), best_bbox
+
+    def _is_static_plate_box(self, x1: int, y1: int, x2: int, y2: int, now: float) -> bool:
+        """True if a plate-shaped box has fired at ~this location repeatedly
+        within PLATE_STATIC_WINDOW_S — i.e. it's fixed background (OSD
+        timestamp, signage) the detector keeps mistaking for a plate, not a
+        vehicle passing through. See the comment on _plate_box_hits."""
+        key = (round(x1 / PLATE_STATIC_GRID_PX), round(y1 / PLATE_STATIC_GRID_PX),
+               round(x2 / PLATE_STATIC_GRID_PX), round(y2 / PLATE_STATIC_GRID_PX))
+        hits = self._plate_box_hits.setdefault(key, [])
+        hits.append(now)
+        cutoff = now - PLATE_STATIC_WINDOW_S
+        while hits and hits[0] < cutoff:
+            hits.pop(0)
+        # Bound memory on long runs: drop keys that have gone idle.
+        if len(self._plate_box_hits) > 500:
+            self._plate_box_hits = {k: v for k, v in self._plate_box_hits.items() if v}
+        return len(hits) >= PLATE_STATIC_MIN_REPEATS
 
     def _maybe_push_plate(self, frame_ts: float | None, plate_text: str,
                           conf: float, ocr_conf: float, plate_box,
@@ -947,6 +1016,9 @@ class CameraPipeline(threading.Thread):
                     if conf < 0.35:
                         continue
                     x1, y1, x2, y2 = [int(v) for v in pbox.xyxy[0]]
+                    if self._is_static_plate_box(x1, y1, x2, y2, time.time()):
+                        self.anpr_stats["rejected_static"] += 1
+                        continue
                     crop = frame[max(y1, 0):y2, max(x1, 0):x2]
                     if crop.size == 0:
                         continue
@@ -980,13 +1052,22 @@ class CameraPipeline(threading.Thread):
                         # wire is what distinguishes it — no separate flag).
                         if ocr_conf < PLATE_MIN_CONF:
                             self.anpr_stats["discarded_conf"] += 1
+                            plate_debug_sample(self.camera_id, crop_gray, raw_text,
+                                                pred.char_probs, ocr_conf, conf, None,
+                                                crop.shape[1])
                             continue
                         corrected = _clean_plate_text(raw_text)
                         if corrected is None:
                             self.anpr_stats["rejected_format"] += 1
+                            plate_debug_sample(self.camera_id, crop_gray, raw_text,
+                                                pred.char_probs, ocr_conf, conf, None,
+                                                crop.shape[1])
                             log.debug("[%s] ANPR reject (format) raw=%r ocr=%.2f",
                                       external_id(self.camera_id), raw_text, ocr_conf)
                             continue
+                        plate_debug_sample(self.camera_id, crop_gray, raw_text,
+                                            pred.char_probs, ocr_conf, conf, corrected,
+                                            crop.shape[1])
                         self.anpr_stats["validated"] += 1
                         self._maybe_push_plate(
                             frame_ts, corrected, conf, ocr_conf,

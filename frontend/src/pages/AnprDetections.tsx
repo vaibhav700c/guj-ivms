@@ -200,6 +200,7 @@ export default function AnprDetections() {
                     <div className="flex items-center gap-2">
                       <Car size={13} className={TYPE_COLORS[e.vehicle_type ?? ""] ?? "text-slate-500"} />
                       <span className="font-mono font-bold text-sm text-orange-400">{e.plate_text}</span>
+                      {e.source === "simulator" && <SimulatedBadge />}
                     </div>
                     <div className="text-[9px] font-mono text-slate-700 ml-5">{e.plate_normalized}</div>
                   </td>
