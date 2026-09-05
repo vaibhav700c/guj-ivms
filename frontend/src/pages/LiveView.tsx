@@ -213,20 +213,27 @@ function StreamTile({ camera, big, clock, onExpand, proxyUrl, startDelayMs = 0 }
 
       if (Hls.isSupported()) {
         const hls = new Hls({
-          enableWorker: true, lowLatencyMode: false, maxBufferLength: 8, maxMaxBufferLength: 15,
-          // Defaults (10s manifest / 20s fragment) are tuned for a single
-          // stream. A cold 3x3+ grid queues several distinct cameras' first
-          // playlist/key/segment fetches behind the backend's own upstream
-          // concurrency gate (bounded on purpose — the Cloudflare-fronted CDN
-          // 403s a true unbounded burst) — measured directly against
-          // production, the backend genuinely completes these requests, just
-          // not always inside hls.js's default patience window while queued.
-          // More patience here trades a slightly slower first frame for not
-          // giving up on (and retry-storming) a request that was already
-          // going to succeed.
-          manifestLoadingTimeOut: 20000,
-          manifestLoadingMaxRetry: 2,
-          fragLoadingTimeOut: 30000,
+          enableWorker: true, lowLatencyMode: false, maxBufferLength: 12, maxMaxBufferLength: 30,
+          // Measured directly against the upstream CDN (deliberate, spaced
+          // curls, not a load test): connect/TLS/auth is fast (~2.7-3.3s
+          // TTFB), but body transfer crawls at roughly 4-25 KB/s regardless
+          // of file size — a 215KB playlist took 48.9s total, a 532KB
+          // segment took up to 36s. That is a genuine third-party throughput
+          // ceiling (Cloudflare-fronted), not a queueing artifact of our own
+          // proxy — its own concurrency gate logged 0ms wait on every one of
+          // these. hls.js's old defaults (20s manifest / 30s fragment) are
+          // shorter than fetches that are genuinely still going to succeed,
+          // so it was giving up and tearing down/rebuilding the player mid-
+          // fetch — that abandon-and-retry-storm, not the CDN itself, is
+          // what produced "camera hangs, then comes back" for the operator.
+          // Retries are cheap here regardless: the backend coalesces
+          // concurrent identical-URL fetches, so a retry against a fetch
+          // that's still in flight rides the same request instead of
+          // starting a second one.
+          manifestLoadingTimeOut: 60000,
+          manifestLoadingMaxRetry: 3,
+          fragLoadingTimeOut: 60000,
+          fragLoadingMaxRetry: 3,
         });
         hlsRef.current = hls;
 

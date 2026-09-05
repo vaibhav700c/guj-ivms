@@ -290,6 +290,36 @@ _LIVE_POSITION_BUCKET_S = 300.0
 # 300s bucket with margin.
 _LIVE_WINDOW_SEGMENTS = 50
 
+# Measured directly against production (curl straight at the CDN, cookie
+# reused, one deliberate request each — not a load test): TTFB is fast
+# (~2.7-3.3s, so auth/connect/TLS is NOT the bottleneck) but body transfer
+# crawls at roughly 4-25 KB/s regardless of file size (a 215KB playlist took
+# 48.9s total; a 532KB segment took 22.7s). gate_wait was 0ms on every
+# concurrent fetch logged in production, so our own concurrency gate isn't
+# queueing anything either — the entire latency is upstream, inside the
+# Cloudflare-fronted CDN's own throughput ceiling for this connection/IP, and
+# no change to this proxy's concurrency, pooling, or caching can make bytes
+# arrive faster. The only thing we can do is stop that wait from blocking a
+# viewer who's already staring at an empty buffer: start fetching the next
+# couple of not-yet-cached segments in the background the moment a playlist
+# is served, instead of waiting for hls.js to ask once its buffer is already
+# empty. This doesn't add upstream load — it's the exact same segments a
+# playing viewer will need next — it just moves the same fetch earlier.
+_PREFETCH_AHEAD = 2
+_prefetched_windows: set[tuple[str, int]] = set()
+
+
+async def _prefetch_segments(cam_id: str, window: list[tuple[float, str]]) -> None:
+    for _dur, seg in window[:_PREFETCH_AHEAD]:
+        key = f"{cam_id}/{seg}"
+        if key in _segment_cache:
+            continue
+        try:
+            resp = await _upstream_get(f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{seg}", timeout=45)
+            _cache_segment(key, resp.content)
+        except HTTPException as exc:
+            logger.warning("prefetch failed for %s: %s", key, exc.detail)
+
 
 @router.get("/hls/{cam_id}/index.m3u8")
 async def hls_playlist(cam_id: str, request: Request):
@@ -301,7 +331,16 @@ async def hls_playlist(cam_id: str, request: Request):
         segments, key_uri = cached[1]
     else:
         upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/index.m3u8"
-        resp = await _upstream_get(upstream_url, timeout=20)
+        # 20s was measured shorter than reality: a deliberate direct-to-CDN
+        # timing (dns=0.003s connect=0.35s tls=0.43s but ttfb=2.8s total=48.9s
+        # for a 215KB playlist) showed the raw upstream fetch can legitimately
+        # take up to ~49s — TTFB/auth is fast, the CDN's body-transfer
+        # throughput is just genuinely slow (Cloudflare-fronted, ~4-25 KB/s
+        # measured). A 20s timeout was aborting fetches that were still going
+        # to succeed and surfacing them as 502s (observed in production logs:
+        # fetch=41700ms then "502 Bad Gateway" fanned out to every coalesced
+        # waiter). 60s comfortably covers the measured worst case.
+        resp = await _upstream_get(upstream_url, timeout=60)
         segments, key_uri = _parse_upstream_playlist(cam_id, resp.text)
         _playlist_cache[cam_id] = (now, (segments, key_uri))
 
@@ -338,6 +377,18 @@ async def hls_playlist(cam_id: str, request: Request):
             lines.append("#EXT-X-DISCONTINUITY")
         lines.append(f"#EXTINF:{dur:.3f},")
         lines.append(f"/api/v1/sentinel/hls/{cam_id}/{seg}")
+
+    # Fire-and-forget, deduped per (camera, window position) so the frequent
+    # repeat polling every viewer's hls.js does against the *same* window
+    # (playlist reloads every ~targetDuration seconds without the window
+    # actually moving) doesn't spawn a redundant task each time — only a
+    # genuine advance to a new window is worth prefetching for again.
+    window_key = (cam_id, global_seq)
+    if window_key not in _prefetched_windows:
+        _prefetched_windows.add(window_key)
+        if len(_prefetched_windows) > 500:
+            _prefetched_windows.clear()
+        asyncio.create_task(_prefetch_segments(cam_id, window))
 
     return _playlist_response("\n".join(lines) + "\n")
 
@@ -450,7 +501,13 @@ async def hls_segment(cam_id: str, segment: str):
         _segment_cache.move_to_end(key)
     else:
         upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
-        resp = await _upstream_get(upstream_url, timeout=30)
+        # 30s was measured shorter than reality too: a deliberate direct
+        # fetch of one segment (532KB, fast TTFB) still took 22.7s end to end,
+        # and production logs showed this proxy's own gate-to-response fetch
+        # time reach 57s for a single cold segment with zero gate-wait — i.e.
+        # genuinely upstream, not our queueing. 60s matches the playlist
+        # route and the frontend's fragLoadingTimeOut.
+        resp = await _upstream_get(upstream_url, timeout=60)
         content = resp.content
         _cache_segment(key, content)
         headers["X-Sentinel-Cache"] = "miss"
