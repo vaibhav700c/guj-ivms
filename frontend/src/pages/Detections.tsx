@@ -94,6 +94,7 @@ export default function Detections() {
     <div className="space-y-4 max-w-[1400px]">
       <div className="page-header">
         <div>
+          <span className="page-kicker">OpenCV · Real Evidence Frames</span>
           <h1 className="page-title">Detection Viewer</h1>
           <p className="page-subtitle">
             {realOnly

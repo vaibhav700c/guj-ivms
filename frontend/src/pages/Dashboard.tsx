@@ -171,6 +171,7 @@ export default function Dashboard() {
       {/* ── Page header ─────────────────────────────────────── */}
       <div className="page-header">
         <div>
+          <span className="page-kicker">Gujarat Police · Sentinel Grid</span>
           <h1 className="page-title">Control Room Dashboard</h1>
           <p className="page-subtitle">
             Gujarat Integrated Video Management &amp; Analytics ·{" "}

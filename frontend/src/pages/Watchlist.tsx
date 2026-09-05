@@ -136,8 +136,9 @@ export default function Watchlist() {
     <div className="space-y-4 max-w-[1100px]">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold">Watchlist Management</h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <span className="page-kicker">Correlation Source</span>
+          <h1 className="page-title">Watchlist Management</h1>
+          <p className="page-subtitle">
             Continuous cross-reference feed for the alert engine · {items.filter((i) => i.active).length} active
           </p>
         </div>

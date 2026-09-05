@@ -268,8 +268,9 @@ export default function Vehicles() {
   return (
     <div className="space-y-4 max-w-[1400px]">
       <div>
-        <h1 className="text-xl font-bold">Vehicle Search &amp; Journey Reconstruction</h1>
-        <p className="text-xs text-slate-500 mt-0.5">
+        <span className="page-kicker">ANPR · Cross-Camera ReID</span>
+        <h1 className="page-title">Vehicle Search &amp; Journey Reconstruction</h1>
+        <p className="page-subtitle">
           Cross-camera plate matching → timestamped route replay (plan §7 / §20.2 test scenario)
         </p>
       </div>

@@ -115,6 +115,7 @@ export default function LiveView() {
         {/* Toolbar */}
         <div className="flex items-center justify-between">
           <div>
+            <span className="page-kicker">30 Cameras · HLS/AES-128</span>
             <h1 className="page-title text-lg">Unified Live View</h1>
             <p className="text-[11px] text-slate-600">
               {shown.length} streams · HLS proxied · AES-128 decrypted ·{" "}

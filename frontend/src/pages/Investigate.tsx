@@ -364,8 +364,9 @@ export default function Investigate() {
   return (
     <div className="space-y-4 max-w-[1100px]">
       <div>
-        <h1 className="text-xl font-bold flex items-center gap-2"><UserSearch size={20} className="text-orange-400" /> Investigate</h1>
-        <p className="text-xs text-slate-500 mt-0.5">
+        <span className="page-kicker">Edge Inference</span>
+        <h1 className="page-title flex items-center gap-2"><UserSearch size={20} className="text-orange-400" /> Investigate</h1>
+        <p className="page-subtitle">
           Upload a wanted-person photo or enter a plate number, then run the real edge detection
           pipeline (YOLOv8 + InsightFace ArcFace + plate OCR) against live or local camera feeds.
         </p>
