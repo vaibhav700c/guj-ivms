@@ -11,6 +11,8 @@ import {
 } from "recharts";
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 interface Overview {
   cameras_total: number; cameras_online: number; cameras_offline: number;
@@ -18,7 +20,7 @@ interface Overview {
   anpr_events_24h: number; anpr_events_total: number;
   detections_24h: number; watchlist_active: number; registry_vehicles: number;
 }
-interface AlertItem { id: number; severity: string; message: string; status: string; timestamp: string; camera_name: string | null; }
+interface AlertItem { id: number; severity: string; message: string; status: string; timestamp: string; camera_name: string | null; source?: string; }
 interface AlertStats { by_status: Record<string, number>; by_severity: Record<string, number>; total: number; unacknowledged: number; }
 interface TierItem { tier: string; count: number; description: string; }
 interface SimStatus { running: boolean; events_generated: number; alerts_generated: number; }
@@ -110,10 +112,14 @@ export default function Dashboard() {
     });
   };
 
+  const realOnly = useSettings((s) => s.realOnly);
+
   const refresh = () => {
+    const alertsQs = new URLSearchParams({ limit: "8", status: "new" });
+    if (realOnly) alertsQs.set("source", "edge_worker");
     const tasks = [
       api<Overview>("/analytics/overview").then((d) => { setOv(d); setSectionError("overview", null); }).catch((e) => setSectionError("overview", e)),
-      api<{ items: AlertItem[] }>("/alerts?limit=8&status=new").then((r) => { setAlerts(r.items); setSectionError("alerts", null); }).catch((e) => setSectionError("alerts", e)),
+      api<{ items: AlertItem[] }>(`/alerts?${alertsQs}`).then((r) => { setAlerts(r.items); setSectionError("alerts", null); }).catch((e) => setSectionError("alerts", e)),
       api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=12").then((d) => { setTimeline(d); setSectionError("timeline", null); }).catch((e) => setSectionError("timeline", e)),
       api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=6").then((d) => { setTraffic(d); setSectionError("traffic", null); }).catch((e) => setSectionError("traffic", e)),
       api<SimStatus>("/simulator/status").then((d) => { setSimStatus(d); setSectionError("sim", null); }).catch((e) => setSectionError("sim", e)),
@@ -127,7 +133,8 @@ export default function Dashboard() {
     refresh().finally(() => setInitialLoading(false));
     const id = setInterval(refresh, 15_000);
     return () => clearInterval(id);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realOnly]);
 
   const toggleSim = async () => {
     if (!simStatus) return;
@@ -329,7 +336,10 @@ export default function Dashboard() {
                 className={`px-4 py-2.5 flex items-start gap-2.5 ${a.severity === "critical" ? "row-critical" : a.severity === "high" ? "row-high" : ""}`}>
                 <span className={`${SEV[a.severity] ?? SEV.low} mt-0.5 shrink-0`}>{a.severity}</span>
                 <div className="min-w-0">
-                  <div className="text-xs text-slate-200 truncate">{a.message}</div>
+                  <div className="text-xs text-slate-200 truncate flex items-center gap-1.5">
+                    {a.message}
+                    {a.source === "simulator" && <SimulatedBadge />}
+                  </div>
                   <div className="text-[10px] text-slate-600 mt-0.5 font-mono">
                     {a.camera_name && <span className="text-slate-500">{a.camera_name} · </span>}
                     {formatDateTime(a.timestamp)}

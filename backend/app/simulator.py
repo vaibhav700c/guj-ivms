@@ -105,7 +105,12 @@ class Simulator:
             ocr_confidence=round(random.uniform(0.78, 0.98), 2),
             direction=random.choice(["inbound", "outbound"]),
             lane=random.randint(1, 3),
-            snapshot_ref=f"snapshots/{camera.id}/{normalize_plate(plate)}-{int(datetime.now().timestamp())}.jpg",
+            # No snapshot_ref: this path is never written to disk. A fabricated
+            # pointer to a nonexistent file is worse than an honest absence —
+            # only evidence_image_b64 (real pixels from the edge worker) should
+            # ever back an "evidence" image in the UI.
+            snapshot_ref=None,
+            source="simulator",
             timestamp=datetime.now(timezone.utc),
         )
         db.add(event)
@@ -143,6 +148,7 @@ class Simulator:
                     "face_name": name,
                     "embedding_stub": [round(random.uniform(-1, 1), 3) for _ in range(8)],
                 } if event_type == "face" else {},
+                source="simulator",
                 timestamp=datetime.now(timezone.utc),
             )
             db.add(det)
@@ -153,7 +159,8 @@ class Simulator:
             if event_type == "face" and name:
                 alert_engine.evaluate_person_event(
                     db, det_cam.id, name, det.confidence,
-                    snapshot_ref=f"snapshots/{det_cam.id}/face-{det.id}.jpg",
+                    snapshot_ref=None,  # no file is ever written — see ANPR event above
+                    source="simulator",
                 )
 
             # Live analytics overlay (plan §13 /ws/analytics)
@@ -163,6 +170,7 @@ class Simulator:
                 "camera_name": det_cam.name,
                 "event_type": event_type,
                 "confidence": det.confidence,
+                "source": "simulator",
                 "timestamp": det.timestamp.isoformat(),
             }
             asyncio.create_task(event_bus.publish("analytics:new", analytics_payload))
@@ -179,6 +187,7 @@ class Simulator:
             latency_ms=round(random.uniform(40, 240), 1) if cam.status == "online" else round(random.uniform(400, 1500), 1),
             packet_loss=round(random.uniform(0, 0.03), 4) if cam.status == "online" else round(random.uniform(0.05, 0.4), 4),
             error_message=None if cam.status == "online" else "stream unreachable / RTSP timeout",
+            source="simulator",
         ))
         db.commit()
 

@@ -131,9 +131,20 @@ async def _fetch_once(url: str, cookie: str, timeout: float) -> httpx.Response:
         )
 
 
+# Diagnostic timing for the most recent upstream fetch of each URL — split out
+# gate wait time (queued behind the concurrency semaphore) from actual network
+# fetch time, so a slow tile can be attributed to "our own queueing" vs
+# "upstream/CDN is just slow" instead of guessing. Exposed via the
+# X-Sentinel-Wait-Ms / X-Sentinel-Fetch-Ms response headers.
+_last_timing: dict[str, tuple[float, float]] = {}
+
+
 async def _do_upstream_get(url: str, timeout: float) -> httpx.Response:
     global _cached_cookie
+    gate_start = time.monotonic()
     async with _gate():
+        wait_ms = (time.monotonic() - gate_start) * 1000
+        fetch_start = time.monotonic()
         try:
             resp = await _fetch_once(url, await _get_sentinel_cookie(), timeout)
 
@@ -149,6 +160,13 @@ async def _do_upstream_get(url: str, timeout: float) -> httpx.Response:
                 resp = await _fetch_once(url, await _get_sentinel_cookie(), timeout)
         except httpx.HTTPError as exc:
             raise HTTPException(502, f"Upstream request failed: {exc}") from exc
+        finally:
+            fetch_ms = (time.monotonic() - fetch_start) * 1000
+            _last_timing[url] = (wait_ms, fetch_ms)
+            logger.info(
+                "sentinel upstream fetch %s — gate_wait=%.0fms fetch=%.0fms",
+                url, wait_ms, fetch_ms,
+            )
 
     if resp.status_code != 200:
         raise HTTPException(resp.status_code, f"Upstream returned {resp.status_code}")
@@ -191,6 +209,11 @@ async def refresh_auth():
     try:
         await _get_sentinel_cookie()
         return {"status": "ok"}
+    except HTTPException as exc:
+        # HTTPException doesn't feed its detail into Exception.__str__, so
+        # str(exc) silently returns "" here — that swallowed the real reason
+        # for every past auth failure. Surface .detail explicitly instead.
+        return {"status": "error", "message": exc.detail}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
@@ -285,10 +308,14 @@ async def hls_playlist(cam_id: str, request: Request):
     if not segments:
         raise HTTPException(502, "Upstream playlist had no segments")
 
-    epoch = _loop_epoch.setdefault(cam_id, now)
+    # The epoch must sit on the same bucket grid as the position we derive from
+    # it. Storing a raw `now` here made `bucketed_now - epoch` negative for up to
+    # one full bucket after a camera's first request, which emitted an invalid
+    # negative EXT-X-MEDIA-SEQUENCE (the spec requires a non-negative integer).
     bucketed_now = (now // _LIVE_POSITION_BUCKET_S) * _LIVE_POSITION_BUCKET_S
+    epoch = _loop_epoch.setdefault(cam_id, bucketed_now)
     avg_dur = sum(d for d, _ in segments) / len(segments)
-    global_seq = int((bucketed_now - epoch) / avg_dur)
+    global_seq = max(0, int((bucketed_now - epoch) / avg_dur))
     start_idx = global_seq % len(segments)
     window = [segments[(start_idx + i) % len(segments)] for i in range(_LIVE_WINDOW_SEGMENTS)]
     target_duration = max(int(d) for d, _ in window) + 1
@@ -411,25 +438,30 @@ async def hls_segment(cam_id: str, segment: str):
 
     key = f"{cam_id}/{segment}"
     content = _segment_cache.get(key)
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        # Segments are immutable for a given id, so let the browser hold
+        # them too — this is the main lever against Cloudflare throttling
+        # our single shared egress IP.
+        "Cache-Control": "public, max-age=3600",
+        "X-Sentinel-Cache": "hit",
+    }
     if content is not None:
         _segment_cache.move_to_end(key)
     else:
-        resp = await _upstream_get(
-            f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}", timeout=30
-        )
+        upstream_url = f"{settings.SENTINEL_HLS_BASE}/{cam_id}/{segment}"
+        resp = await _upstream_get(upstream_url, timeout=30)
         content = resp.content
         _cache_segment(key, content)
+        headers["X-Sentinel-Cache"] = "miss"
+        wait_ms, fetch_ms = _last_timing.get(upstream_url, (0.0, 0.0))
+        headers["X-Sentinel-Wait-Ms"] = f"{wait_ms:.0f}"
+        headers["X-Sentinel-Fetch-Ms"] = f"{fetch_ms:.0f}"
 
     return Response(
         content=content,
         media_type="video/MP2T",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            # Segments are immutable for a given id, so let the browser hold
-            # them too — this is the main lever against Cloudflare throttling
-            # our single shared egress IP.
-            "Cache-Control": "public, max-age=3600",
-        },
+        headers=headers,
     )
 
 

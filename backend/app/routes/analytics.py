@@ -85,12 +85,17 @@ def anpr_events(
     camera_id: int | None = None,
     plate: str | None = None,
     vehicle_type: str | None = None,
+    source: str | None = None,
     hours: float = 24.0,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """ANPR detections with filters (plan §13 analytics/anpr)."""
+    """ANPR detections with filters (plan §13 analytics/anpr).
+
+    `source` filters provenance ("edge_worker" = genuine, "simulator" =
+    fabricated demo data) — see CLAUDE.md "Two event sources".
+    """
     from datetime import datetime, timedelta, timezone
 
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -101,6 +106,8 @@ def anpr_events(
         q = q.filter(ANPREvent.vehicle_type == vehicle_type)
     if plate:
         q = q.filter(ANPREvent.plate_normalized.contains(normalize_plate(plate)))
+    if source:
+        q = q.filter(ANPREvent.source == source)
     total = q.count()
     events = q.order_by(ANPREvent.timestamp.desc()).offset(offset).limit(limit).all()
     return {"total": total, "items": [_anpr_item(e) for e in events]}
@@ -120,37 +127,43 @@ def _anpr_item(e: ANPREvent) -> dict:
         "confidence": e.confidence,
         "ocr_confidence": e.ocr_confidence,
         "snapshot_ref": e.snapshot_ref,
+        "source": e.source,
         "timestamp": e.timestamp.isoformat(),
     }
 
 
 @router.get("/anpr/search")
-def anpr_search(plate: str, limit: int = Query(50, ge=1, le=500), db: Session = Depends(get_db)):
-    """Search ANPR detections by plate number (plan §13 analytics/anpr/search)."""
+def anpr_search(plate: str, source: str | None = None, limit: int = Query(50, ge=1, le=500),
+                db: Session = Depends(get_db)):
+    """Search ANPR detections by plate number (plan §13 analytics/anpr/search).
+
+    `source` filters provenance — see CLAUDE.md "Two event sources".
+    """
     norm = normalize_plate(plate)
-    events = (
+    q = (
         db.query(ANPREvent)
         .options(joinedload(ANPREvent.camera))
         .filter(ANPREvent.plate_normalized.contains(norm))
-        .order_by(ANPREvent.timestamp.desc())
-        .limit(limit)
-        .all()
     )
+    if source:
+        q = q.filter(ANPREvent.source == source)
+    events = q.order_by(ANPREvent.timestamp.desc()).limit(limit).all()
     return {"query": plate, "total": len(events), "items": [_anpr_item(e) for e in events]}
 
 
 @router.get("/faces")
-def face_events(limit: int = Query(50, ge=1, le=500), db: Session = Depends(get_db)):
-    """Face detection events from Tier A cameras (plan §6 / §13 analytics/faces)."""
+def face_events(limit: int = Query(50, ge=1, le=500), source: str | None = None,
+                db: Session = Depends(get_db)):
+    """Face detection events from Tier A cameras (plan §6 / §13 analytics/faces).
+
+    `source` filters provenance — see CLAUDE.md "Two event sources".
+    """
     from app.models import DetectionEvent
 
-    events = (
-        db.query(DetectionEvent)
-        .filter(DetectionEvent.event_type == "face")
-        .order_by(DetectionEvent.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(DetectionEvent).filter(DetectionEvent.event_type == "face")
+    if source:
+        q = q.filter(DetectionEvent.source == source)
+    events = q.order_by(DetectionEvent.timestamp.desc()).limit(limit).all()
     return {"total": len(events), "items": [
         {
             "id": d.id,
@@ -160,6 +173,7 @@ def face_events(limit: int = Query(50, ge=1, le=500), db: Session = Depends(get_
             "embedding_dims": len(d.metadata_json.get("embedding_stub", [])),
             "confidence": d.confidence,
             "bbox": d.bbox,
+            "source": d.source,
             "timestamp": d.timestamp.isoformat(),
         }
         for d in events
@@ -189,18 +203,22 @@ def traffic_density(db: Session = Depends(get_db)):
 
 @router.get("/events")
 def generic_events(limit: int = Query(100, ge=1, le=500), event_type: str | None = None,
-                   camera_id: int | None = None, db: Session = Depends(get_db)):
+                   camera_id: int | None = None, source: str | None = None,
+                   db: Session = Depends(get_db)):
     """Generic detection event stream (plan §13 analytics/events).
 
     camera_id filtering was silently a no-op before — the param didn't exist
     on this endpoint at all, so passing it just returned the latest N events
-    across every camera regardless.
+    across every camera regardless. `source` filters provenance ("edge_worker"
+    | "simulator") — see CLAUDE.md "Two event sources".
     """
     q = db.query(DetectionEvent)
     if event_type:
         q = q.filter(DetectionEvent.event_type == event_type)
     if camera_id is not None:
         q = q.filter(DetectionEvent.camera_id == camera_id)
+    if source:
+        q = q.filter(DetectionEvent.source == source)
     events = q.order_by(DetectionEvent.timestamp.desc()).limit(limit).all()
     cam_names = {c.id: c.name for c in db.query(Camera.id, Camera.name).all()}
     return {"total": len(events), "items": [
@@ -212,6 +230,7 @@ def generic_events(limit: int = Query(100, ge=1, le=500), event_type: str | None
             "track_id": d.track_id,
             "confidence": d.confidence,
             "bbox": d.bbox,
+            "source": d.source,
             "timestamp": d.timestamp.isoformat(),
             "has_evidence_image": bool((d.metadata_json or {}).get("evidence_image")),
         }

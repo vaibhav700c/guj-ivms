@@ -112,6 +112,17 @@ def _start_camera_locked(camera_id: int) -> None:
     _pipelines[camera_id] = p
 
 
+def _camera_stat_snapshot(cid: int) -> dict:
+    p = _pipelines.get(cid)
+    return {
+        "camera_id": cid,
+        "running": p is not None,
+        "frames_processed": p.frames_processed if p else 0,
+        "faces_matched": p.faces_matched if p else 0,
+        "anpr_stats": dict(p.anpr_stats) if p else {},
+    }
+
+
 def _release_camera_locked(camera_id: int) -> None:
     _refcount[camera_id] = _refcount.get(camera_id, 1) - 1
     if _refcount[camera_id] <= 0:
@@ -126,6 +137,14 @@ def _stop_job(job_id: str) -> dict | None:
         job = _jobs.get(job_id)
         if job is None or job["status"] != "running":
             return job
+        # Snapshot each camera's counters BEFORE releasing — releasing may
+        # pop (and stop) the underlying CameraPipeline entirely if this was
+        # its last job, and monitor_status() would otherwise report 0 for a
+        # job that actually processed real frames while it ran. This was the
+        # exact cause of a monitor/status response showing
+        # frames_processed=0 on every camera for a "stopped" job that had, in
+        # fact, been decoding real RTSP frames the whole time.
+        job["final_camera_stats"] = {cid: _camera_stat_snapshot(cid) for cid in job["camera_ids"]}
         for cid in job["camera_ids"]:
             _release_camera_locked(cid)
         job["status"] = "stopped"
@@ -360,17 +379,22 @@ def monitor_status():
     with _lock:
         jobs = []
         for job in _jobs.values():
+            final = job.get("final_camera_stats") or {}
             cam_stats = []
             for cid in job["camera_ids"]:
-                p = _pipelines.get(cid)
-                cam_stats.append({
-                    "camera_id": cid,
-                    "running": p is not None,
-                    "frames_processed": p.frames_processed if p else 0,
-                    "faces_matched": p.faces_matched if p else 0,
-                    "anpr_stats": dict(p.anpr_stats) if p else {},
-                })
-            jobs.append({**job, "cameras": cam_stats})
+                # A stopped job's cameras may have been popped from
+                # _pipelines entirely (last job referencing them released
+                # it) — fall back to the snapshot taken at stop time instead
+                # of silently reporting 0 for a job that really did process
+                # frames. A camera still shared with another running job
+                # keeps reporting live.
+                if cid in _pipelines:
+                    cam_stats.append(_camera_stat_snapshot(cid))
+                elif cid in final:
+                    cam_stats.append(final[cid])
+                else:
+                    cam_stats.append(_camera_stat_snapshot(cid))
+            jobs.append({k: v for k, v in job.items() if k != "final_camera_stats"} | {"cameras": cam_stats})
     return {"jobs": jobs}
 
 

@@ -36,7 +36,7 @@ REID_TIME_WINDOW_MIN = 45
 REID_SIMILARITY_THRESHOLD = 0.85
 
 
-def _appearance_probable_matches(db: Session, sightings: list[dict]) -> list[dict]:
+def _appearance_probable_matches(db: Session, sightings: list[dict], source: str | None = None) -> list[dict]:
     """Cross-camera vehicle matching for cameras that cannot read a plate at
     all (plan §7.2 Method 2 / Key Differentiator #3). For each confirmed ANPR
     sighting that carries an appearance signature (see
@@ -60,18 +60,15 @@ def _appearance_probable_matches(db: Session, sightings: list[dict]) -> list[dic
             continue
         window_start = ts - timedelta(minutes=REID_TIME_WINDOW_MIN)
         window_end = ts + timedelta(minutes=REID_TIME_WINDOW_MIN)
-        candidates = (
-            db.query(DetectionEvent)
-            .filter(
-                DetectionEvent.event_type == "vehicle",
-                DetectionEvent.camera_id != s["camera_id"],
-                DetectionEvent.timestamp >= window_start,
-                DetectionEvent.timestamp <= window_end,
-            )
-            .order_by(DetectionEvent.timestamp.desc())
-            .limit(300)
-            .all()
+        cand_q = db.query(DetectionEvent).filter(
+            DetectionEvent.event_type == "vehicle",
+            DetectionEvent.camera_id != s["camera_id"],
+            DetectionEvent.timestamp >= window_start,
+            DetectionEvent.timestamp <= window_end,
         )
+        if source:
+            cand_q = cand_q.filter(DetectionEvent.source == source)
+        candidates = cand_q.order_by(DetectionEvent.timestamp.desc()).limit(300).all()
         for c in candidates:
             csig = (c.metadata_json or {}).get("appearance_signature")
             if not csig:
@@ -138,17 +135,22 @@ def _vr_item(r: VehicleRecord) -> dict:
 
 
 @router.get("/search/{plate}")
-def search_vehicle(plate: str, db: Session = Depends(get_db)):
-    """Full timeline for a plate: registry + all ANPR sightings + journey legs."""
+def search_vehicle(plate: str, source: str | None = None, db: Session = Depends(get_db)):
+    """Full timeline for a plate: registry + all ANPR sightings + journey legs.
+
+    `source` filters provenance ("edge_worker" | "simulator") — see CLAUDE.md
+    "Two event sources". With `source=edge_worker`, a plate that only ever
+    appeared in fabricated simulator events returns zero sightings rather
+    than a partially-filtered, still-fabricated journey.
+    """
     norm = normalize_plate(plate)
     record = _registry_query(db, norm)
-    events = (
-        db.query(ANPREvent)
-        .options(joinedload(ANPREvent.camera))
-        .filter(ANPREvent.plate_normalized == norm)
-        .order_by(ANPREvent.timestamp.asc())
-        .all()
+    events_q = db.query(ANPREvent).options(joinedload(ANPREvent.camera)).filter(
+        ANPREvent.plate_normalized == norm
     )
+    if source:
+        events_q = events_q.filter(ANPREvent.source == source)
+    events = events_q.order_by(ANPREvent.timestamp.asc()).all()
     sightings = []
     probable = []
     for e in events:
@@ -167,20 +169,21 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
             "vehicle_color": e.vehicle_color,
             "snapshot_ref": e.snapshot_ref,
             "has_evidence_image": bool(e.evidence_image_b64),
+            "source": e.source,
             "appearance_signature": (e.embedding or {}).get("appearance"),
         })
 
     # Probable (OCR-tolerant) matches — plan §20.2 step 5 (ReID/fuzzy fallback)
     from difflib import SequenceMatcher
 
-    other_events = (
+    other_events_q = (
         db.query(ANPREvent)
         .options(joinedload(ANPREvent.camera))
         .filter(ANPREvent.plate_normalized != norm)
-        .order_by(ANPREvent.timestamp.desc())
-        .limit(500)
-        .all()
     )
+    if source:
+        other_events_q = other_events_q.filter(ANPREvent.source == source)
+    other_events = other_events_q.order_by(ANPREvent.timestamp.desc()).limit(500).all()
     seen_plates: set[str] = set()
     for e in other_events:
         if e.plate_normalized in seen_plates:
@@ -206,6 +209,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
                 "city": cam.city if cam else None,
                 "timestamp": e.timestamp.isoformat() if e.timestamp else None,
                 "confidence": e.confidence,
+                "source": e.source,
             })
 
     # Journey legs: distance, elapsed time, implied speed between consecutive sightings
@@ -231,7 +235,7 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
             "avg_speed_kmph": round(speed, 1) if speed and speed < 160 else None,
         })
 
-    reid_matches = _appearance_probable_matches(db, sightings)
+    reid_matches = _appearance_probable_matches(db, sightings, source=source)
     for s in sightings:
         s.pop("appearance_signature", None)  # internal-only, not for the API response
 
@@ -262,9 +266,12 @@ def search_vehicle(plate: str, db: Session = Depends(get_db)):
 
 
 @router.get("/journey/{plate}")
-def journey_reconstruction(plate: str, db: Session = Depends(get_db)):
-    """Reconstructed route with GIS — alias for full search (plan §13 vehicles/journey)."""
-    data = search_vehicle(plate, db)
+def journey_reconstruction(plate: str, source: str | None = None, db: Session = Depends(get_db)):
+    """Reconstructed route with GIS — alias for full search (plan §13 vehicles/journey).
+
+    `source` filters provenance — see CLAUDE.md "Two event sources".
+    """
+    data = search_vehicle(plate, source=source, db=db)
     return {
         "plate": data["plate"],
         "journey_start": data["sightings"][0]["timestamp"] if data["sightings"] else None,
@@ -278,15 +285,16 @@ def journey_reconstruction(plate: str, db: Session = Depends(get_db)):
 
 
 @router.get("/last-seen/{plate}")
-def last_seen(plate: str, db: Session = Depends(get_db)):
-    """Most recent sighting of a plate (plan §13 vehicles/last-seen)."""
+def last_seen(plate: str, source: str | None = None, db: Session = Depends(get_db)):
+    """Most recent sighting of a plate (plan §13 vehicles/last-seen).
+
+    `source` filters provenance — see CLAUDE.md "Two event sources".
+    """
     norm = normalize_plate(plate)
-    event = (
-        db.query(ANPREvent)
-        .filter(ANPREvent.plate_normalized == norm)
-        .order_by(ANPREvent.timestamp.desc())
-        .first()
-    )
+    q = db.query(ANPREvent).filter(ANPREvent.plate_normalized == norm)
+    if source:
+        q = q.filter(ANPREvent.source == source)
+    event = q.order_by(ANPREvent.timestamp.desc()).first()
     if not event:
         raise HTTPException(404, "No sightings recorded for this plate")
     cam = event.camera
@@ -302,6 +310,7 @@ def last_seen(plate: str, db: Session = Depends(get_db)):
         "confidence": event.confidence,
         "snapshot_ref": event.snapshot_ref,
         "has_evidence_image": bool(event.evidence_image_b64),
+        "source": event.source,
     }
 
 
@@ -337,14 +346,13 @@ def registry_lookup(plate: str, db: Session = Depends(get_db)):
 
 
 @router.get("/recent")
-def recent_detections(limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db)):
-    events = (
-        db.query(ANPREvent)
-        .options(joinedload(ANPREvent.camera))
-        .order_by(ANPREvent.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+def recent_detections(limit: int = Query(50, ge=1, le=200), source: str | None = None,
+                      db: Session = Depends(get_db)):
+    """`source` filters provenance — see CLAUDE.md "Two event sources"."""
+    q = db.query(ANPREvent).options(joinedload(ANPREvent.camera))
+    if source:
+        q = q.filter(ANPREvent.source == source)
+    events = q.order_by(ANPREvent.timestamp.desc()).limit(limit).all()
     return {"items": [
         {
             "id": e.id,
@@ -353,6 +361,7 @@ def recent_detections(limit: int = Query(50, ge=1, le=200), db: Session = Depend
             "city": e.camera.city if e.camera else None,
             "vehicle_type": e.vehicle_type,
             "confidence": e.confidence,
+            "source": e.source,
             "timestamp": e.timestamp.isoformat() if e.timestamp else None,
         }
         for e in events

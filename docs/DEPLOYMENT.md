@@ -15,8 +15,11 @@ The steps below document how this deployment was created and how to reproduce it
 4. Environment → set `CORS_ORIGINS` to the Vercel URL (step 2 below), e.g.
    `https://guj-ivms.vercel.app`.
 5. Verify: `curl https://guj-ivms-api.onrender.com/health` → `{"status":"ok",...}`
-   First boot auto-seeds 50 cameras, watchlist, VAHAN records, and users, and
-   starts the demo simulator (`SIMULATOR_AUTO_START=true`).
+   First boot auto-seeds 50 cameras, watchlist, VAHAN records, and users. The
+   demo simulator stays off (`SIMULATOR_AUTO_START=false`) — start it
+   deliberately (Dashboard toggle or `POST /api/v1/simulator/start`) when you
+   want a live-events demo without real cameras; every row it writes is
+   stamped `source="simulator"` and never shown as a genuine detection.
 
 ## 2. Vercel frontend
 
@@ -44,17 +47,24 @@ Vite (see `frontend/vercel.json`) → add the two `VITE_*` env vars → Deploy.
 
 ## 3. Smoke test the deployed product
 
-1. Open the Vercel URL → Dashboard shows live ANPR counters within ~10 s.
-2. **Live Alerts** page → alerts stream over WebSocket every few seconds
-   (watchlist hits from the demo simulator).
-3. **Vehicle Search** → `GJ 01 AB 1234` → journey map + timeline fills as the
-   tracked vehicle crosses cameras.
-4. **Live View** → 3×3 control-room grid; **GIS Map** → 50 cameras state-wide.
+1. Open the Vercel URL → the top-bar "Real detections only" toggle is ON by
+   default, so the Dashboard starts empty until real events arrive.
+2. Turn the Dashboard's "Analytics Simulator" on (or turn the top-bar toggle
+   off) to see fabricated demo data — every row it produces is tagged
+   `source: "simulator"` and rendered with an amber **SIMULATED** badge.
+3. **Live Alerts** page → with the simulator running, alerts stream over
+   WebSocket every few seconds (watchlist hits from the demo simulator).
+4. **Vehicle Search** → `GJ 01 AB 1234` → with the simulator running and
+   "Real detections only" off, journey map + timeline fills as the tracked
+   demo vehicle crosses cameras. With the toggle on, this fabricated plate
+   correctly returns no sightings.
+5. **Live View** → 3×3 control-room grid; **GIS Map** → 50 cameras state-wide.
 
 ## 4. Going beyond the demo
 
-- Set `SIMULATOR_AUTO_START=false` and point edge nodes at
-  `POST /api/v1/ingest/anpr` with header `X-API-Key: <INGEST_API_KEY>`.
+- `SIMULATOR_AUTO_START` already defaults to `false` in `render.yaml`. Point
+  edge nodes at `POST /api/v1/ingest/anpr` with header
+  `X-API-Key: <INGEST_API_KEY>`.
 - Set `REQUIRE_AUTH=true` to enforce JWT; login remains `POST /api/v1/auth/login`.
 - Add Redis (Render key-value or Upstash) and set `REDIS_URL` for multi-replica
   WebSocket fan-out.

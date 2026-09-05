@@ -211,21 +211,24 @@ def bulk_import_cameras(payload: list[CameraCreate], request: Request, db: Sessi
 
 
 @router.get("/{camera_id}/health-log")
-def camera_health_log(camera_id: int, limit: int = 50, db: Session = Depends(get_db)):
-    """Time-series health samples for one camera (plan §9.1 camera_health_log)."""
+def camera_health_log(camera_id: int, limit: int = 50, source: str | None = None,
+                      db: Session = Depends(get_db)):
+    """Time-series health samples for one camera (plan §9.1 camera_health_log).
+
+    `source` filters provenance ("edge_worker" | "simulator") — see
+    CLAUDE.md "Two event sources". No real health-telemetry pipeline exists
+    yet, so every row is currently written by the demo simulator.
+    """
     from app.models import CameraHealthLog
 
-    rows = (
-        db.query(CameraHealthLog)
-        .filter(CameraHealthLog.camera_id == camera_id)
-        .order_by(CameraHealthLog.time.desc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(CameraHealthLog).filter(CameraHealthLog.camera_id == camera_id)
+    if source:
+        q = q.filter(CameraHealthLog.source == source)
+    rows = q.order_by(CameraHealthLog.time.desc()).limit(limit).all()
     return {"camera_id": camera_id, "items": [
         {"time": r.time.isoformat(), "status": r.status, "fps_actual": r.fps_actual,
          "latency_ms": r.latency_ms, "packet_loss": r.packet_loss,
-         "error_message": r.error_message}
+         "error_message": r.error_message, "source": r.source}
         for r in rows
     ]}
 

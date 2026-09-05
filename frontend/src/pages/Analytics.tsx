@@ -6,6 +6,8 @@ import {
 } from "recharts";
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -14,7 +16,7 @@ const TT = { background: "#0d1a2e", border: "1px solid #1e3352", borderRadius: 1
 
 interface FaceEvent {
   id: number; camera_name: string | null; detected_identifier: string | null;
-  confidence: number | null; timestamp: string; event_type: string;
+  confidence: number | null; timestamp: string; event_type: string; source?: string;
 }
 
 function SectionTitle({ icon: Icon, children }: { icon: React.ElementType; children: React.ReactNode }) {
@@ -76,7 +78,11 @@ export default function Analytics() {
     });
   };
 
+  const realOnly = useSettings((s) => s.realOnly);
+
   const load = () => {
+    const faceQs = new URLSearchParams({ limit: "20", alert_type: "wanted_person" });
+    if (realOnly) faceQs.set("source", "edge_worker");
     const tasks = [
       api<{ hour: string; count: number }[]>("/vehicles/traffic/by-hour").then((d) => { setByHour(d); setSectionError("byHour", null); }).catch((e) => setSectionError("byHour", e)),
       api<{ camera: string; city: string; events: number }[]>("/vehicles/traffic/by-camera?limit=10").then((d) => { setByCamera(d); setSectionError("byCamera", null); }).catch((e) => setSectionError("byCamera", e)),
@@ -85,14 +91,15 @@ export default function Analytics() {
       api<Record<string, number>>("/analytics/overview").then((d) => { setOverview(d); setSectionError("overview", null); }).catch((e) => setSectionError("overview", e)),
       api<{ bucket: string; count: number }[]>("/analytics/events/timeline?hours=24").then((d) => { setTimeline(d); setSectionError("timeline", null); }).catch((e) => setSectionError("timeline", e)),
       // Face detection events (detection events with face type)
-      api<{ items: FaceEvent[] }>("/alerts?limit=20&alert_type=wanted_person").then((r) => { setFaceEvents(r.items ?? []); setSectionError("faceEvents", null); }).catch((e) => setSectionError("faceEvents", e)),
+      api<{ items: FaceEvent[] }>(`/alerts?${faceQs}`).then((r) => { setFaceEvents(r.items ?? []); setSectionError("faceEvents", null); }).catch((e) => setSectionError("faceEvents", e)),
     ];
     return Promise.all(tasks).then(() => undefined);
   };
 
   useEffect(() => {
     load().finally(() => setInitialLoading(false));
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realOnly]);
 
   return (
     <div className="space-y-6 max-w-[1500px] animate-fade-in">
@@ -107,14 +114,15 @@ export default function Analytics() {
         </div>
         <div className="flex gap-2 flex-wrap">
           {[
-            { href: `${BASE}/api/v1/reports/alerts.csv`, label: "Alerts CSV" },
-            { href: `${BASE}/api/v1/reports/anpr.csv`, label: "ANPR CSV" },
-            { href: `${BASE}/api/v1/reports/cameras.csv`, label: "Registry CSV" },
-            { href: `${BASE}/api/v1/reports/alerts.pdf`, label: "Alerts PDF" },
-            { href: `${BASE}/api/v1/reports/anpr.pdf`, label: "ANPR PDF" },
-            { href: `${BASE}/api/v1/reports/cameras.pdf`, label: "Registry PDF" },
+            { href: `${BASE}/api/v1/reports/alerts.csv`, label: "Alerts CSV", filterable: true },
+            { href: `${BASE}/api/v1/reports/anpr.csv`, label: "ANPR CSV", filterable: true },
+            { href: `${BASE}/api/v1/reports/cameras.csv`, label: "Registry CSV", filterable: false },
+            { href: `${BASE}/api/v1/reports/alerts.pdf`, label: "Alerts PDF", filterable: true },
+            { href: `${BASE}/api/v1/reports/anpr.pdf`, label: "ANPR PDF", filterable: true },
+            { href: `${BASE}/api/v1/reports/cameras.pdf`, label: "Registry PDF", filterable: false },
           ].map((d) => (
-            <a key={d.href} className="btn-ghost text-xs" href={d.href} download>
+            <a key={d.href} className="btn-ghost text-xs"
+              href={d.filterable && realOnly ? `${d.href}?source=edge_worker` : d.href} download>
               <Download size={12} /> {d.label}
             </a>
           ))}
@@ -332,6 +340,7 @@ export default function Analytics() {
                   <td className="table-cell font-mono text-xs">{formatDateTime(ev.timestamp)}</td>
                   <td className="table-cell">
                     <span className="badge bg-violet-500/15 text-violet-400 border border-violet-500/25">{ev.event_type ?? "face"}</span>
+                    {ev.source === "simulator" && <SimulatedBadge className="ml-1.5" />}
                   </td>
                 </tr>
               ))}

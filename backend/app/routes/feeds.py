@@ -53,10 +53,17 @@ def feeds_status(db: Session = Depends(get_db)):
                 "protocol": c.stream_protocol,
                 "resolution": c.resolution,
                 "fps_target": c.fps,
+                # No real per-frame telemetry pipeline exists yet (see
+                # camera_health_log, which the simulator populates) — these
+                # two figures are placeholder jitter around the configured
+                # target, not a measurement, regardless of camera or source.
+                # `source: "simulator"` here flags that honestly rather than
+                # presenting them as genuine measured values.
                 "fps_actual": round((c.fps or 15) * random.uniform(0.9, 1.0), 1)
                 if c.status == "online" else 0,
                 "latency_ms": round(random.uniform(40, 220), 0)
                 if c.status == "online" else None,
+                "source": "simulator",
                 "last_seen": c.last_seen.isoformat() if c.last_seen else None,
             }
             for c in cams

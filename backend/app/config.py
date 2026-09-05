@@ -26,8 +26,13 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000,https://guj-ivms.vercel.app,https://live.sentinelgujarat.in"
 
-    # Demo simulator (edge/analytics node emulation)
-    SIMULATOR_AUTO_START: bool = True
+    # Demo simulator (edge/analytics node emulation). Fabricates ANPR/detection/
+    # health events — every row is stamped source="simulator" (see models.py)
+    # so it can never be mistaken for a genuine edge-worker detection, but the
+    # honest default is still to have it OFF: real deployments (and this repo's
+    # public demo) should show only what the real pipeline actually detected
+    # unless someone deliberately opts into the fabricated data for a live demo.
+    SIMULATOR_AUTO_START: bool = False
     SIMULATOR_INTERVAL_SECONDS: float = 2.0
 
     # Seed

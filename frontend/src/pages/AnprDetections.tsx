@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Search, Download, RefreshCw, Car, Filter } from "lucide-react";
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
+import SimulatedBadge from "../components/SimulatedBadge";
+import { useSettings } from "../store/settings";
 
 const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
@@ -19,6 +21,7 @@ interface AnprEvent {
   ocr_confidence: number | null;
   snapshot_ref: string | null;
   timestamp: string;
+  source?: string;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -43,6 +46,7 @@ export default function AnprDetections() {
   const liveInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const LIMIT = 50;
+  const realOnly = useSettings((s) => s.realOnly);
 
   const load = async (reset = false) => {
     setLoading(true);
@@ -54,6 +58,7 @@ export default function AnprDetections() {
     });
     if (plate) params.set("plate", plate);
     if (cameraId) params.set("camera_id", cameraId);
+    if (realOnly) params.set("source", "edge_worker");
     try {
       const r = await api<{ total: number; items: AnprEvent[] }>(`/analytics/anpr?${params}`);
       setTotal(r.total);
@@ -76,13 +81,15 @@ export default function AnprDetections() {
 
   useEffect(() => {
     load(true);
-  }, [plate, cameraId, hours]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plate, cameraId, hours, realOnly]);
 
   useEffect(() => {
     if (!liveMode) { if (liveInterval.current) clearInterval(liveInterval.current); return; }
     liveInterval.current = setInterval(() => load(true), 10_000);
     return () => { if (liveInterval.current) clearInterval(liveInterval.current); };
-  }, [liveMode, plate, cameraId, hours]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveMode, plate, cameraId, hours, realOnly]);
 
   const confColor = (c: number) =>
     c >= 0.9 ? "text-emerald-400" : c >= 0.7 ? "text-amber-400" : "text-red-400";

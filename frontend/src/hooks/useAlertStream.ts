@@ -6,6 +6,9 @@ export interface TickerAlert {
   severity: string;
   message: string;
   timestamp: string;
+  /** "edge_worker" (genuine) | "simulator" (fabricated demo data) — see
+   * backend Alert.source / CLAUDE.md "Two event sources". */
+  source?: string;
 }
 
 /** Loosely typed — this is the raw `payload` of a `type: "alert"` WS message. */
@@ -19,6 +22,7 @@ export interface AlertStreamPayload {
   message?: string | null;
   status?: string;
   timestamp: string;
+  source?: string;
   [key: string]: unknown;
 }
 
@@ -119,7 +123,7 @@ function connect() {
       useAlertStreamStore.setState((s) => ({
         unread: s.unread + 1,
         ticker: [
-          { severity: payload.severity ?? "medium", message: payload.message ?? "Alert", timestamp: payload.timestamp ?? new Date().toISOString() },
+          { severity: payload.severity ?? "medium", message: payload.message ?? "Alert", timestamp: payload.timestamp ?? new Date().toISOString(), source: payload.source },
           ...s.ticker,
         ].slice(0, 20),
         lastEvent: { payload, seq: seqCounter },

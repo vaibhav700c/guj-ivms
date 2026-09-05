@@ -22,7 +22,7 @@ services:
       - key: REQUIRE_AUTH
         value: "false" # set "true" to enforce JWT on all APIs
       - key: SIMULATOR_AUTO_START
-        value: "true" # demo event generation; set "false" when real ingest nodes connect
+        value: "false" # fabricated demo event generation — opt in deliberately for a live demo; never the silent default
       - key: INGEST_API_KEY
         generateValue: true
       - key: SEED_ON_STARTUP

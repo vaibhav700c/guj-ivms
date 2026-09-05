@@ -102,6 +102,10 @@ class AlertEngine:
             match_confidence=confidence,
             snapshot_ref=event.snapshot_ref,
             evidence_image_b64=event.evidence_image_b64,
+            # Inherit provenance from the event that triggered this alert —
+            # never let a fabricated (simulator) event produce an alert that
+            # looks like a genuine edge-worker watchlist hit.
+            source=event.source,
             message=message,
             status="new",
             timestamp=datetime.now(timezone.utc),
@@ -119,6 +123,7 @@ class AlertEngine:
         embedding: list[float] | None = None,
         matched_watchlist_id: int | None = None,
         similarity: float | None = None,
+        source: str = "edge_worker",
     ) -> Alert | None:
         """Face-recognition correlation (plan §6).
 
@@ -131,7 +136,13 @@ class AlertEngine:
         """
         match: WatchlistEntry | None = None
         sim_used: float | None = similarity
-        match_mode = "demo"
+        # Diagnostic label for *which matching path* fired (useful in the
+        # message text regardless of provenance) — this is NOT how callers
+        # should tell a fabricated alert from a genuine one; that is what the
+        # structured `source` param/column is for. "name-token" is the
+        # simulator's demo-mode fallback (token overlap on name, no real
+        # biometric match).
+        match_mode = "name-token"
 
         if matched_watchlist_id is not None:
             # Edge already ran on-device ArcFace gallery search — a single
@@ -177,8 +188,11 @@ class AlertEngine:
             else:
                 match = None
         if match is None and embedding is None:
-            # Demo fallback (simulator): simulated InsightFace similarity —
-            # token overlap on name, tiny random hit rate.
+            # Demo-mode fallback (used by the simulator): no real biometric
+            # embedding was supplied at all, so match on name-token overlap
+            # plus a tiny random hit rate to keep the demo alive. Genuine
+            # edge-worker face events always carry `embedding` or
+            # `matched_watchlist_id` and never reach this branch.
             import random
 
             entries = (
@@ -212,6 +226,7 @@ class AlertEngine:
             match_confidence=round(sim_used, 3) if sim_used else round(confidence, 2),
             snapshot_ref=snapshot_ref,
             evidence_image_b64=evidence_image,
+            source=source,
             message=(
                 f"{'WANTED' if match.category == 'wanted_person' else 'MISSING'} person "
                 f"{match.identifier} matched by face recognition at "
@@ -251,6 +266,7 @@ class AlertEngine:
             "match_confidence": alert.match_confidence,
             "message": alert.message,
             "status": alert.status,
+            "source": alert.source,
             "timestamp": alert.timestamp.isoformat() if alert.timestamp else None,
             "snapshot_ref": alert.snapshot_ref,
             "watchlist": {

@@ -82,6 +82,10 @@ body {
   .badge-online   { @apply badge bg-emerald-500/15 text-emerald-400 border border-emerald-500/25; }
   .badge-offline  { @apply badge bg-red-500/15 text-red-400 border border-red-500/25; }
   .badge-maintenance { @apply badge bg-amber-500/15 text-amber-400 border border-amber-500/25; }
+  /* Fabricated demo data (source === "simulator") — never let it read as a
+     genuine detection. Amber, same family as -medium/-maintenance, but its
+     own class so call sites read intent rather than severity. */
+  .badge-simulated { @apply badge bg-amber-500/15 text-amber-400 border border-amber-500/25 animate-pulse; }
 
   /* Table */
   .table-head { @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-slate-500; }

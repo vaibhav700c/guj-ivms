@@ -145,6 +145,11 @@ class ANPREvent(Base):
     # at the moment of this specific event — distinct from snapshot_ref, which
     # is a filesystem path only meaningful on the worker's own machine.
     evidence_image_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provenance: "edge_worker" for genuine detections ingested via the
+    # federation API, "simulator" for events fabricated by the in-process
+    # demo generator (app/simulator.py). Never trust a plate/detection is
+    # real without checking this — see CLAUDE.md "Two event sources".
+    source: Mapped[str] = mapped_column(String(20), default="edge_worker", index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     camera: Mapped["Camera"] = relationship()
@@ -163,6 +168,8 @@ class DetectionEvent(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     bbox: Mapped[dict] = mapped_column(JSON, default=dict)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Provenance — see ANPREvent.source above.
+    source: Mapped[str] = mapped_column(String(20), default="edge_worker", index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -181,6 +188,10 @@ class Alert(Base):
     # at match time and carried through from the ingest payload/source event —
     # renders directly in the UI without needing the worker's machine reachable.
     evidence_image_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provenance: inherited from the triggering event — "edge_worker" for a
+    # genuine watchlist hit, "simulator" for one raised off fabricated demo
+    # data. See ANPREvent.source above.
+    source: Mapped[str] = mapped_column(String(20), default="edge_worker", index=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="new", index=True)
     acknowledged_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -235,4 +246,8 @@ class CameraHealthLog(Base):
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     packet_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provenance — see ANPREvent.source above. The simulator invents FPS/
+    # latency/packet-loss numbers wholesale; a real health pipeline does not
+    # exist yet, so every row is currently "simulator" until one is wired up.
+    source: Mapped[str] = mapped_column(String(20), default="edge_worker", index=True)
     time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

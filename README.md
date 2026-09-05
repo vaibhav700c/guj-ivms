@@ -53,7 +53,10 @@ cd backend
 python -m venv .venv && .venv/bin/pip install -r requirements.txt pytest
 .venv/bin/uvicorn app.main:app --port 8000
 # Seeded automatically: 30 Sentinel Grid cameras, watchlist, VAHAN records, users
-# Demo simulator starts automatically and generates live events + alerts
+# Demo simulator is OFF by default (SIMULATOR_AUTO_START=false) — the dashboard
+# starts empty until a real edge worker ingests events, or you deliberately turn
+# the simulator on (POST /api/v1/simulator/start, or SIMULATOR_AUTO_START=true)
+# for a live demo. Every row it writes is stamped source="simulator" either way.
 
 # Run the test suite (isolated SQLite DB, deterministic — simulator disabled)
 .venv/bin/python -m pytest tests/ -v
@@ -105,8 +108,11 @@ docker compose up --build
 
 Deployed via Render (Docker backend + managed PostgreSQL, `render.yaml` Blueprint
 spec in repo) and Vercel (`frontend/vercel.json`, Vite). First boot auto-seeds
-the 30 Sentinel Grid cameras, watchlist, VAHAN records and users, and the demo
-simulator generates live events/alerts.
+the 30 Sentinel Grid cameras, watchlist, VAHAN records and users. The demo
+simulator (`SIMULATOR_AUTO_START=false`) is off by default — start it explicitly
+from the Dashboard or `POST /api/v1/simulator/start` for a live-events demo;
+every row it produces is stamped `source="simulator"` and is filterable/badged
+as such everywhere in the UI and API.
 
 > **Deploying this yourself:** apply `render.yaml` as a Render **Blueprint** rather
 > than creating the service by hand — otherwise none of its environment variables
@@ -135,7 +141,10 @@ Interactive docs: `/docs` (Swagger UI).
 ## Production hardening checklist
 
 - Set `REQUIRE_AUTH=true` + strong `SECRET_KEY` (Render `generateValue`).
-- Set `SIMULATOR_AUTO_START=false` once real ingest nodes are connected; keep `INGEST_API_KEY`.
+- `SIMULATOR_AUTO_START` now defaults to `false` — every ANPR/detection/alert row is stamped
+  `source` ("edge_worker" vs "simulator") regardless, but the honest default is real data only.
+  Set `SIMULATOR_AUTO_START=true` deliberately for a live demo without cameras; keep `INGEST_API_KEY`
+  set once real ingest nodes are connected.
 - Redis (`REDIS_URL`) enables cross-replica WebSocket fan-out for scaling beyond one instance.
 - Raw video never transits this API — object store (MinIO/S3) references only (`snapshot_ref`).
 

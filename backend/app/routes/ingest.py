@@ -70,6 +70,10 @@ async def ingest_anpr(payload: ANPRIngest, db: Session = Depends(get_db),
         snapshot_ref=payload.snapshot_ref,
         evidence_image_b64=payload.evidence_image,
         embedding={"appearance": payload.appearance_signature} if payload.appearance_signature else {},
+        # Federation ingest is, by definition, the genuine edge pipeline —
+        # the payload has no caller-controlled `source` field, so this can
+        # never be spoofed by a POST body.
+        source="edge_worker",
         timestamp=payload.timestamp or datetime.now(timezone.utc),
     )
     db.add(event)
@@ -95,6 +99,7 @@ def ingest_detection(payload: DetectionIngest, db: Session = Depends(get_db),
         confidence=payload.confidence,
         bbox=payload.bbox,
         metadata_json=payload.metadata,
+        source="edge_worker",
         timestamp=payload.timestamp or datetime.now(timezone.utc),
     )
     db.add(det)
@@ -116,6 +121,7 @@ def ingest_detection(payload: DetectionIngest, db: Session = Depends(get_db),
             embedding=payload.metadata.get("embedding"),
             matched_watchlist_id=payload.metadata.get("matched_watchlist_id"),
             similarity=payload.metadata.get("similarity"),
+            source="edge_worker",
         )
 
     return {

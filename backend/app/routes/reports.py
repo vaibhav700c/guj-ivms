@@ -41,40 +41,34 @@ def _pdf_response(filename: str, title: str, header: list[str], rows) -> Respons
     )
 
 
-def _alert_rows(db: Session):
+def _alert_rows(db: Session, source: str | None = None):
     # joinedload(Alert.camera) turns what was up to 5000 lazy-loaded
     # `a.camera` round-trips into a single SELECT ... JOIN cameras query.
-    alerts = (
-        db.query(Alert)
-        .options(joinedload(Alert.camera))
-        .order_by(Alert.timestamp.desc())
-        .limit(MAX_EXPORT_LIMIT)
-        .all()
-    )
-    header = ["id", "type", "severity", "identifier", "camera", "status", "timestamp"]
+    q = db.query(Alert).options(joinedload(Alert.camera))
+    if source:
+        q = q.filter(Alert.source == source)
+    alerts = q.order_by(Alert.timestamp.desc()).limit(MAX_EXPORT_LIMIT).all()
+    header = ["id", "type", "severity", "identifier", "camera", "status", "source", "timestamp"]
     rows = [
         [a.id, a.alert_type, a.severity, a.detected_identifier,
-         a.camera.name if a.camera else "", a.status,
+         a.camera.name if a.camera else "", a.status, a.source,
          a.timestamp.isoformat() if a.timestamp else ""]
         for a in alerts
     ]
     return header, rows
 
 
-def _anpr_rows(db: Session, limit: int = MAX_EXPORT_LIMIT):
+def _anpr_rows(db: Session, limit: int = MAX_EXPORT_LIMIT, source: str | None = None):
     # Same fix as above: eager-load ANPREvent.camera instead of one query
     # per row (up to `limit` extra round-trips previously).
-    events = (
-        db.query(ANPREvent)
-        .options(joinedload(ANPREvent.camera))
-        .order_by(ANPREvent.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
-    header = ["id", "plate", "camera", "vehicle_type", "direction", "confidence", "timestamp"]
+    q = db.query(ANPREvent).options(joinedload(ANPREvent.camera))
+    if source:
+        q = q.filter(ANPREvent.source == source)
+    events = q.order_by(ANPREvent.timestamp.desc()).limit(limit).all()
+    header = ["id", "plate", "camera", "vehicle_type", "direction", "confidence", "source", "timestamp"]
     rows = [
         [e.id, e.plate_text, e.camera.name if e.camera else e.camera_id,
-         e.vehicle_type or "", e.direction or "", e.confidence,
+         e.vehicle_type or "", e.direction or "", e.confidence, e.source,
          e.timestamp.isoformat() if e.timestamp else ""]
         for e in events
     ]
@@ -93,14 +87,14 @@ def _camera_rows(db: Session):
 
 
 @router.get("/alerts.csv")
-def export_alerts(db: Session = Depends(get_db)):
-    header, rows = _alert_rows(db)
+def export_alerts(source: str | None = None, db: Session = Depends(get_db)):
+    header, rows = _alert_rows(db, source)
     return _csv_response("alerts.csv", header, rows)
 
 
 @router.get("/alerts.pdf")
-def export_alerts_pdf(db: Session = Depends(get_db)):
-    header, rows = _alert_rows(db)
+def export_alerts_pdf(source: str | None = None, db: Session = Depends(get_db)):
+    header, rows = _alert_rows(db, source)
     return _pdf_response("alerts.pdf", "Watchlist Alert Report", header, rows)
 
 
@@ -108,8 +102,9 @@ def export_alerts_pdf(db: Session = Depends(get_db)):
 def export_anpr(
     db: Session = Depends(get_db),
     limit: int = Query(MAX_EXPORT_LIMIT, ge=1, le=MAX_EXPORT_LIMIT),
+    source: str | None = None,
 ):
-    header, rows = _anpr_rows(db, limit)
+    header, rows = _anpr_rows(db, limit, source)
     return _csv_response("anpr_events.csv", header, rows)
 
 
@@ -117,8 +112,9 @@ def export_anpr(
 def export_anpr_pdf(
     db: Session = Depends(get_db),
     limit: int = Query(MAX_EXPORT_LIMIT, ge=1, le=MAX_EXPORT_LIMIT),
+    source: str | None = None,
 ):
-    header, rows = _anpr_rows(db, limit)
+    header, rows = _anpr_rows(db, limit, source)
     return _pdf_response("anpr_events.pdf", "ANPR Detection Report", header, rows)
 
 

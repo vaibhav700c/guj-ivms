@@ -70,6 +70,13 @@ def get_db():
 _LIGHT_MIGRATIONS = [
     ("anpr_events", "evidence_image_b64", "TEXT"),
     ("alerts", "evidence_image_b64", "TEXT"),
+    # Event provenance ("edge_worker" vs "simulator") — see models.py source
+    # column docstrings and CLAUDE.md "Two event sources". VARCHAR(20) is
+    # valid on both SQLite (type affinity, no enforced length) and Postgres.
+    ("anpr_events", "source", "VARCHAR(20) DEFAULT 'edge_worker'"),
+    ("detection_events", "source", "VARCHAR(20) DEFAULT 'edge_worker'"),
+    ("alerts", "source", "VARCHAR(20) DEFAULT 'edge_worker'"),
+    ("camera_health_log", "source", "VARCHAR(20) DEFAULT 'edge_worker'"),
 ]
 
 

@@ -3,12 +3,13 @@ import {
   LayoutDashboard, Video, MonitorPlay, Map as MapIcon,
   Car, Siren, ListChecks, BarChart3, ShieldCheck, LogOut,
   Bell, BellOff, WifiOff, ChevronRight, ScanLine, Loader2, UserSearch,
-  BoxSelect,
+  BoxSelect, ShieldAlert, FlaskConical,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../store/auth";
 import { useBackendStatus } from "../lib/api";
 import { useAlertStream } from "../hooks/useAlertStream";
+import { useSettings } from "../store/settings";
 
 const NAV = [
   { to: "/",          label: "Dashboard",      icon: LayoutDashboard },
@@ -33,6 +34,8 @@ export default function Layout() {
   // Layout owns the single shared /ws/alerts connection for the whole app session.
   const { connected, unread, ticker, soundOn, clearUnread, toggleSound } = useAlertStream(true);
   const backendWaking = useBackendStatus((s) => s.waking);
+  const realOnly = useSettings((s) => s.realOnly);
+  const toggleRealOnly = useSettings((s) => s.toggleRealOnly);
 
   // Close sidebar on outside click (mobile)
   useEffect(() => {
@@ -45,7 +48,21 @@ export default function Layout() {
     return () => document.removeEventListener("mousedown", h);
   }, [expanded]);
 
-  const tickerText = ticker.slice(0, 5).map((a) => `● ${a.severity.toUpperCase()}: ${a.message}`).join("   ·   ");
+  const tickerItems = ticker.slice(0, 5);
+  const renderTicker = (keyPrefix: string) => (
+    <>
+      {tickerItems.map((a, i) => (
+        <span key={`${keyPrefix}-${i}`} className="inline-flex items-center gap-1.5 mr-16">
+          <span>● {a.severity.toUpperCase()}: {a.message}</span>
+          {a.source === "simulator" && (
+            <span className="badge-simulated text-[8px] shrink-0" title="Fabricated by the demo simulator — not a genuine detection">
+              SIMULATED
+            </span>
+          )}
+        </span>
+      ))}
+    </>
+  );
 
   return (
     <div className="h-full flex flex-col bg-control-950">
@@ -68,12 +85,11 @@ export default function Layout() {
 
         {/* Alert ticker */}
         <div className="flex-1 min-w-0 mx-4 overflow-hidden">
-          {tickerText ? (
+          {tickerItems.length > 0 ? (
             <div className="ticker-wrap text-[11px] font-mono">
               <div className="ticker-inner text-amber-400/70">
-                {tickerText}
-                <span className="mx-16" />
-                {tickerText}
+                {renderTicker("a")}
+                {renderTicker("b")}
               </div>
             </div>
           ) : (
@@ -85,6 +101,25 @@ export default function Layout() {
 
         {/* Right controls */}
         <div className="flex items-center gap-3 shrink-0">
+          {/* Real-only toggle — see backend `source` column / CLAUDE.md "Two
+              event sources". Defaults ON: the honest view is the default. */}
+          <button
+            onClick={toggleRealOnly}
+            title={realOnly
+              ? "Showing only genuine edge-worker detections. Click to also show fabricated simulator data."
+              : "Showing fabricated simulator data alongside genuine detections. Click to show real detections only."}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-all ${
+              realOnly
+                ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/25"
+                : "bg-amber-500/10 text-amber-400 border-amber-500/25 animate-pulse"
+            }`}
+          >
+            {realOnly ? <ShieldAlert size={12} /> : <FlaskConical size={12} />}
+            <span className="hidden md:inline">
+              {realOnly ? "Real detections only" : "Simulated data shown"}
+            </span>
+          </button>
+
           {/* WS status */}
           <div className="flex items-center gap-1.5 text-[11px]">
             {connected

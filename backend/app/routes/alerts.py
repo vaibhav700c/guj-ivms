@@ -35,6 +35,7 @@ def serialize(a: Alert) -> dict:
         "message": a.message,
         "status": a.status,
         "acknowledged_by": a.acknowledged_by,
+        "source": a.source,
         "snapshot_ref": a.snapshot_ref,
         "has_evidence_image": bool(a.evidence_image_b64),
         "timestamp": a.timestamp.isoformat() if a.timestamp else None,
@@ -53,11 +54,14 @@ def list_alerts(
     severity: str | None = None,
     alert_type: str | None = None,
     camera_id: int | None = None,
+    source: str | None = None,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
     _: object = Depends(get_current_user),
 ):
+    """`source` filters provenance ("edge_worker" | "simulator") — see
+    CLAUDE.md "Two event sources"."""
     q = db.query(Alert)
     if status_filter:
         q = q.filter(Alert.status == status_filter)
@@ -67,6 +71,8 @@ def list_alerts(
         q = q.filter(Alert.alert_type == alert_type)
     if camera_id:
         q = q.filter(Alert.camera_id == camera_id)
+    if source:
+        q = q.filter(Alert.source == source)
     total = q.count()
     items = q.order_by(Alert.timestamp.desc()).offset(offset).limit(limit).all()
     return {"total": total, "items": [serialize(a) for a in items]}

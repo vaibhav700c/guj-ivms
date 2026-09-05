@@ -31,3 +31,5 @@ integration_camera.txt
 snapshots/
 .vercel/
 analytics/local_frames/
+*.db-shm
+*.db-wal

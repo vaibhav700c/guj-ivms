@@ -35,9 +35,15 @@ config/      mediamtx.yml — only for the full local docker-compose stack.
 
 ## Two event sources — know which one you are looking at
 
-1. **`backend/app/simulator.py`** — an in-process demo generator, on by default
-   (`SIMULATOR_AUTO_START`). It fabricates ANPR/detection/health events every 2s
-   so the dashboard, alerts and journey replay are demonstrable without cameras.
+1. **`backend/app/simulator.py`** — an in-process demo generator, **off by
+   default** (`SIMULATOR_AUTO_START=false`). It fabricates ANPR/detection/health
+   events every 2s so the dashboard, alerts and journey replay are demonstrable
+   without cameras — start it deliberately (Dashboard toggle, `POST
+   /api/v1/simulator/start`, or `SIMULATOR_AUTO_START=true`) for a live demo.
+   Every row it writes is stamped `source="simulator"` (ANPREvent,
+   DetectionEvent, Alert, CameraHealthLog all carry this column) so it can
+   never be confused with a genuine edge-worker detection in the API or UI —
+   the frontend's "Real detections only" toggle (default ON) filters on it.
    Disabled automatically during tests.
 2. **`analytics/worker.py`** — the genuine ML pipeline against real cameras. It
    POSTs to `/api/v1/ingest/{anpr,detection}` like any third-party edge node.
