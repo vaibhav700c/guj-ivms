@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   Search, Video, CircleDot, Copy, Check, Wifi, ArrowUpDown, X, Activity, Clock, Cpu,
-  Plus, Upload, FileText, Trash2, AlertTriangle,
+  Plus, Upload, FileText, Trash2, AlertTriangle, ScanEye, User, Car as CarIcon, ScanFace,
 } from "lucide-react";
 import { api, formatDateTime } from "../lib/api";
+import Lightbox, { ExpandHint } from "../components/Lightbox";
+
+const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
 interface Camera {
   id: number; external_id: string | null; name: string;
@@ -28,6 +31,15 @@ interface AnprEvent {
 
 interface Department {
   id: number; name: string; code: string; description: string | null;
+}
+
+interface CapabilityRun {
+  id: number; camera_id: number; started_at: string; ended_at: string;
+  duration_s: number; frames_processed: number;
+  person_detections: number; vehicle_detections: number;
+  face_detections: number; face_matches: number;
+  anpr_stats: Record<string, number>; plates_found: string[];
+  has_evidence: boolean; best_evidence_label: string | null; notes: string | null;
 }
 
 const STATUS_BADGE: Record<string, string> = {
@@ -134,6 +146,8 @@ function CameraDrawer({
   const [healthLog, setHealthLog] = useState<HealthLog[]>([]);
   const [anprEvents, setAnprEvents] = useState<AnprEvent[]>([]);
   const [loadingHealth, setLoadingHealth] = useState(true);
+  const [capabilityRuns, setCapabilityRuns] = useState<CapabilityRun[]>([]);
+  const [enlargedRun, setEnlargedRun] = useState<CapabilityRun | null>(null);
 
   useEffect(() => {
     setLoadingHealth(true);
@@ -142,8 +156,12 @@ function CameraDrawer({
         .then((r) => setHealthLog(r.items)).catch(() => undefined),
       api<{ items: AnprEvent[] }>(`/analytics/anpr?camera_id=${camera.id}&hours=24&limit=10`)
         .then((r) => setAnprEvents(r.items)).catch(() => undefined),
+      api<{ items: CapabilityRun[] }>(`/cameras/${camera.id}/capability-runs?limit=5`)
+        .then((r) => setCapabilityRuns(r.items)).catch(() => undefined),
     ]).finally(() => setLoadingHealth(false));
   }, [camera.id]);
+
+  const latestRun = capabilityRuns[0];
 
   const lastHealth = healthLog[0];
   const uptime = healthLog.length
@@ -271,6 +289,77 @@ function CameraDrawer({
                   ))}
                 </div>
               </>
+            )}
+          </div>
+
+          {/* Verified CV capability — a real, isolated (one-camera-at-a-time,
+              no CPU contention) run of the actual YOLOv8/plate-OCR/ArcFace
+              pipeline, not the operator's manual notes. See
+              analytics/run_capability_audit.py and CameraCapabilityRun. */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-[10px] text-slate-600 uppercase tracking-wider font-semibold">
+              <ScanEye size={10} /> Verified CV Capability
+            </div>
+            {!loadingHealth && capabilityRuns.length === 0 && (
+              <div className="text-xs text-slate-600">
+                Not verified yet — run <code className="font-mono text-slate-500">analytics/run_capability_audit.py</code> to
+                test this camera in isolation and record real results here.
+              </div>
+            )}
+            {latestRun && (
+              <div className="bg-control-850 rounded-lg border border-control-800/50 overflow-hidden">
+                {latestRun.has_evidence && (
+                  <div
+                    className="relative w-full h-28 bg-black/40 cursor-zoom-in group"
+                    onClick={() => setEnlargedRun(latestRun)}
+                    title="Click to enlarge"
+                  >
+                    <img
+                      src={`${API_BASE}/api/v1/cameras/${camera.id}/capability-runs/${latestRun.id}/evidence`}
+                      alt="Real capability-run evidence frame"
+                      loading="lazy"
+                      className="w-full h-full object-cover"
+                    />
+                    <ExpandHint />
+                    {latestRun.best_evidence_label && (
+                      <span className="absolute bottom-1.5 left-1.5 badge bg-black/60 text-white border border-white/10 text-[9px]">
+                        {latestRun.best_evidence_label}
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div className="p-2.5 space-y-2">
+                  <div className="flex items-center justify-between text-[10px] text-slate-500">
+                    <span>{formatDateTime(latestRun.started_at)} · {latestRun.duration_s.toFixed(0)}s isolated run</span>
+                    <span className="font-mono">{latestRun.frames_processed}f</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5 text-center">
+                    {[
+                      { icon: User, label: "Person", value: latestRun.person_detections, color: "text-orange-400" },
+                      { icon: CarIcon, label: "Vehicle", value: latestRun.vehicle_detections, color: "text-emerald-400" },
+                      { icon: ScanFace, label: "Face", value: latestRun.face_detections, color: "text-red-400" },
+                    ].map(({ icon: Icon, label, value, color }) => (
+                      <div key={label} className="bg-control-900 rounded-lg p-1.5 border border-control-800/50">
+                        <Icon size={11} className={`mx-auto mb-0.5 ${color}`} />
+                        <div className={`text-sm font-bold ${color}`}>{value}</div>
+                        <div className="text-[8px] text-slate-600">{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {latestRun.plates_found.length > 0 ? (
+                    <div className="text-[10px] text-slate-400">
+                      Real plates read: {latestRun.plates_found.map((p) => (
+                        <span key={p} className="font-mono text-orange-400 ml-1">{p}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-slate-600">No format-valid plate this run.</div>
+                  )}
+                  {latestRun.face_matches > 0 && (
+                    <div className="text-[10px] text-red-400">{latestRun.face_matches} watchlist face match(es)</div>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 

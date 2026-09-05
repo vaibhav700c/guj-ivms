@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.audit import write_audit
 from app.db import get_db
-from app.models import ANPREvent, Camera, Department, User
+from app.models import ANPREvent, Camera, CameraCapabilityRun, Department, User
+from app.routes.ingest import check_api_key
 from app.security import Permission, get_current_user, require_permission
 
 router = APIRouter(prefix="/cameras", tags=["cameras"])
@@ -231,6 +232,89 @@ def camera_health_log(camera_id: int, limit: int = 50, source: str | None = None
          "error_message": r.error_message, "source": r.source}
         for r in rows
     ]}
+
+
+class CapabilityRunIngest(BaseModel):
+    """Posted by analytics/run_capability_audit.py after each single-camera
+    verification pass — see CameraCapabilityRun's own docstring."""
+    camera_id: int
+    started_at: datetime
+    ended_at: datetime
+    frames_processed: int = 0
+    person_detections: int = 0
+    vehicle_detections: int = 0
+    face_detections: int = 0
+    face_matches: int = 0
+    anpr_stats: dict = {}
+    plates_found: list[str] = []
+    best_evidence_b64: str | None = None
+    best_evidence_label: str | None = None
+    notes: str | None = None
+
+
+@router.post("/{camera_id}/capability-runs", status_code=201)
+def post_capability_run(camera_id: int, payload: CapabilityRunIngest,
+                        db: Session = Depends(get_db),
+                        _: None = Depends(check_api_key)):
+    if camera_id != payload.camera_id:
+        raise HTTPException(400, "camera_id path/body mismatch")
+    if not db.get(Camera, camera_id):
+        raise HTTPException(404, "Camera not found")
+    duration_s = (payload.ended_at - payload.started_at).total_seconds()
+    run = CameraCapabilityRun(
+        camera_id=camera_id, started_at=payload.started_at, ended_at=payload.ended_at,
+        duration_s=duration_s, frames_processed=payload.frames_processed,
+        person_detections=payload.person_detections, vehicle_detections=payload.vehicle_detections,
+        face_detections=payload.face_detections, face_matches=payload.face_matches,
+        anpr_stats=payload.anpr_stats, plates_found=payload.plates_found,
+        best_evidence_b64=payload.best_evidence_b64, best_evidence_label=payload.best_evidence_label,
+        notes=payload.notes,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return {"id": run.id}
+
+
+def _capability_run_item(r: "CameraCapabilityRun") -> dict:
+    return {
+        "id": r.id, "camera_id": r.camera_id,
+        "started_at": r.started_at.isoformat(), "ended_at": r.ended_at.isoformat(),
+        "duration_s": round(r.duration_s, 1), "frames_processed": r.frames_processed,
+        "person_detections": r.person_detections, "vehicle_detections": r.vehicle_detections,
+        "face_detections": r.face_detections, "face_matches": r.face_matches,
+        "anpr_stats": r.anpr_stats, "plates_found": r.plates_found,
+        "has_evidence": bool(r.best_evidence_b64), "best_evidence_label": r.best_evidence_label,
+        "notes": r.notes,
+    }
+
+
+@router.get("/{camera_id}/capability-runs")
+def list_capability_runs(camera_id: int, limit: int = Query(10, ge=1, le=100),
+                         db: Session = Depends(get_db)):
+    """Real, automated, one-camera-at-a-time CV verification history — the
+    empirical companion to the manually-curated capability notes in
+    analytics_config. Newest first."""
+    rows = (
+        db.query(CameraCapabilityRun)
+        .filter(CameraCapabilityRun.camera_id == camera_id)
+        .order_by(CameraCapabilityRun.started_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"camera_id": camera_id, "items": [_capability_run_item(r) for r in rows]}
+
+
+@router.get("/{camera_id}/capability-runs/{run_id}/evidence")
+def capability_run_evidence(camera_id: int, run_id: int, db: Session = Depends(get_db)):
+    import base64
+
+    from fastapi.responses import Response
+
+    run = db.get(CameraCapabilityRun, run_id)
+    if not run or run.camera_id != camera_id or not run.best_evidence_b64:
+        raise HTTPException(404, "No evidence frame on file for this run")
+    return Response(content=base64.b64decode(run.best_evidence_b64), media_type="image/jpeg")
 
 
 @router.get("/{camera_id}")

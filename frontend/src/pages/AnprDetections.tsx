@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Search, Download, RefreshCw, Car, Filter } from "lucide-react";
+import { Search, Download, RefreshCw, Car, Filter, ScanEye } from "lucide-react";
 import { api, describeApiError, formatDateTime } from "../lib/api";
 import InlineError from "../components/InlineError";
 import SimulatedBadge from "../components/SimulatedBadge";
@@ -26,6 +26,12 @@ interface AnprEvent {
   has_evidence_image?: boolean;
 }
 
+interface VehicleDetection {
+  id: number; camera_id: number; camera_name: string | null;
+  confidence: number; timestamp: string; source?: string;
+  vehicle_class: string | null; has_evidence_image: boolean;
+}
+
 const TYPE_COLORS: Record<string, string> = {
   car: "text-cyan-400",
   motorcycle: "text-violet-400",
@@ -46,6 +52,8 @@ export default function AnprDetections() {
   const [page, setPage] = useState(0);
   const [liveMode, setLiveMode] = useState(true);
   const [enlarged, setEnlarged] = useState<AnprEvent | null>(null);
+  const [vehicles, setVehicles] = useState<VehicleDetection[]>([]);
+  const [enlargedVehicle, setEnlargedVehicle] = useState<VehicleDetection | null>(null);
   const liveInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const LIMIT = 50;
@@ -93,6 +101,28 @@ export default function AnprDetections() {
     return () => { if (liveInterval.current) clearInterval(liveInterval.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveMode, plate, cameraId, hours, realOnly]);
+
+  // Real vehicle detections — plate reads (above) are genuinely rare at
+  // current camera resolution (see CLAUDE.md "Known limitation: live ANPR");
+  // the underlying YOLOv8 vehicle detector runs on every eligible frame
+  // regardless and finds vehicles constantly. Distinct data, distinct
+  // section, clearly labelled — this is NOT a plate read.
+  const loadVehicles = () => {
+    const params = new URLSearchParams({ event_type: "vehicle", limit: "60" });
+    if (cameraId) params.set("camera_id", cameraId);
+    if (realOnly) params.set("source", "edge_worker");
+    api<{ items: VehicleDetection[] }>(`/analytics/events?${params}`)
+      .then((r) => setVehicles(r.items.filter((v) => v.has_evidence_image)))
+      .catch(() => undefined);
+  };
+
+  useEffect(() => {
+    loadVehicles();
+    if (!liveMode) return;
+    const id = setInterval(loadVehicles, 10_000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraId, realOnly, liveMode]);
 
   const confColor = (c: number) =>
     c >= 0.9 ? "text-emerald-400" : c >= 0.7 ? "text-amber-400" : "text-red-400";
@@ -304,12 +334,77 @@ export default function AnprDetections() {
         )}
       </div>
 
+      {/* Real vehicle detections — every real YOLOv8 vehicle detection with a
+          genuine evidence frame, whether or not a plate was successfully
+          read for it. Plate reads above are the rare, corroborated case;
+          this is the much larger real signal underneath — the vehicle
+          detector runs on every eligible frame regardless of ANPR outcome. */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <ScanEye size={14} className="text-emerald-400" />
+          <h2 className="text-sm font-semibold text-slate-200">Real Vehicle Detections</h2>
+          <span className="text-[10px] text-slate-600">
+            — actual YOLOv8 detections with a real annotated frame, plate read or not
+          </span>
+        </div>
+        {vehicles.length === 0 ? (
+          <div className="card p-8 text-center text-sm text-slate-500">
+            No real vehicle detections {cameraId ? "for this camera " : ""}yet.
+            {realOnly && (
+              <div className="mt-1 text-xs text-slate-600">
+                Run analytics/worker.py, control_server.py's Investigate flow, or
+                analytics/offline_capture.py against a real camera to populate this.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+            {vehicles.map((v) => (
+              <div key={v.id} className="card overflow-hidden">
+                <div
+                  className="relative aspect-video bg-control-850 cursor-zoom-in group"
+                  onClick={() => setEnlargedVehicle(v)}
+                  title="Click to enlarge"
+                >
+                  <img
+                    src={`${BASE}/api/v1/analytics/events/${v.id}/evidence`}
+                    alt="Real vehicle detection frame"
+                    loading="lazy"
+                    className="w-full h-full object-cover"
+                  />
+                  <ExpandHint />
+                  <span className="absolute top-1.5 left-1.5 badge bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 text-[9px] capitalize">
+                    {v.vehicle_class ?? "vehicle"}
+                  </span>
+                  <span className="absolute top-1.5 right-1.5 badge bg-black/60 text-white border border-white/10 text-[9px] font-mono">
+                    {(v.confidence * 100).toFixed(0)}%
+                  </span>
+                  {v.source === "simulator" && <SimulatedBadge className="absolute bottom-1.5 left-1.5" />}
+                </div>
+                <div className="p-2 text-[10px]">
+                  <div className="text-slate-400 truncate">{v.camera_name ?? `cam #${v.camera_id}`}</div>
+                  <div className="text-slate-600 font-mono">{formatDateTime(v.timestamp)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {enlarged && (
         <Lightbox
           src={`${BASE}/api/v1/vehicles/events/${enlarged.id}/evidence`}
           alt="ANPR detection frame"
           caption={`${enlarged.plate_text} · ${enlarged.camera_name ?? `cam #${enlarged.camera_id}`} · ${formatDateTime(enlarged.timestamp)}`}
           onClose={() => setEnlarged(null)}
+        />
+      )}
+      {enlargedVehicle && (
+        <Lightbox
+          src={`${BASE}/api/v1/analytics/events/${enlargedVehicle.id}/evidence`}
+          alt="Real vehicle detection frame"
+          caption={`${enlargedVehicle.vehicle_class ?? "vehicle"} · ${enlargedVehicle.camera_name ?? `cam #${enlargedVehicle.camera_id}`} · ${formatDateTime(enlargedVehicle.timestamp)}`}
+          onClose={() => setEnlargedVehicle(null)}
         />
       )}
     </div>

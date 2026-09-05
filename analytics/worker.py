@@ -678,7 +678,7 @@ class CameraPipeline(threading.Thread):
         self._latest_frame: np.ndarray | None = None
         self._latest_pts: float | None = None
         self._frame_lock = threading.Lock()
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._last_plate_push: dict[str, float] = {}   # normalized plate → ts
         self._last_track_push: dict[str, float] = {}   # track key → ts
         self._last_face_pass = 0.0
@@ -711,7 +711,7 @@ class CameraPipeline(threading.Thread):
         self.faces_matched = 0
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     # ── capture thread: always hold the newest frame (drops stale frames) ──
     def _capture_loop(self) -> None:
@@ -721,7 +721,7 @@ class CameraPipeline(threading.Thread):
         url = rtsp_url(self.camera_id)
         # integration.txt §2: force TCP — UDP across NAT yields corrupt frames
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             container = None
             try:
                 if self.models.av is not None:
@@ -734,7 +734,7 @@ class CameraPipeline(threading.Thread):
                     log.info("[%s] RTSP connected (TCP via FFmpeg)", external_id(self.camera_id))
                     self._backoff = 2.0
                     for frame in container.decode(video=0):
-                        if self._stop.is_set():
+                        if self._stop_event.is_set():
                             break
                         img = frame.to_ndarray(format="bgr24")
                         pts_ms = None
@@ -750,7 +750,7 @@ class CameraPipeline(threading.Thread):
                     log.info("[%s] RTSP connected (OpenCV)", external_id(self.camera_id))
                     self._backoff = 2.0
                     try:
-                        while not self._stop.is_set():
+                        while not self._stop_event.is_set():
                             ok, frame = cap.read()
                             if not ok:
                                 break
@@ -768,7 +768,7 @@ class CameraPipeline(threading.Thread):
                     container.close()
                 except Exception:
                     pass
-            self._stop.wait(self._backoff)
+            self._stop_event.wait(self._backoff)
             self._backoff = min(self._backoff * 2, 30.0)
 
     def _capture_loop_local(self) -> None:
@@ -778,19 +778,19 @@ class CameraPipeline(threading.Thread):
         continuously-running camera (the same "loops at the end" behaviour
         integration.txt documents for the real Sentinel grid)."""
         is_device = isinstance(self.video_source, int)
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             cap = cv2.VideoCapture(self.video_source)
             if not cap.isOpened():
                 log.warning("[%s] local source %s did not open — retry in %.0fs",
                             external_id(self.camera_id), self.video_source, self._backoff)
                 cap.release()
-                self._stop.wait(self._backoff)
+                self._stop_event.wait(self._backoff)
                 self._backoff = min(self._backoff * 2, 30.0)
                 continue
             log.info("[%s] local source connected (%s)", external_id(self.camera_id), self.video_source)
             self._backoff = 2.0
             try:
-                while not self._stop.is_set():
+                while not self._stop_event.is_set():
                     ok, frame = cap.read()
                     if not ok:
                         if is_device:
@@ -800,7 +800,7 @@ class CameraPipeline(threading.Thread):
                     with self._frame_lock:
                         self._latest_frame = frame
                         self._latest_pts = time.time() * 1000.0
-                    self._stop.wait(1.0 / max(SAMPLE_FPS * 2, 1.0))  # don't spin faster than needed
+                    self._stop_event.wait(1.0 / max(SAMPLE_FPS * 2, 1.0))  # don't spin faster than needed
             finally:
                 cap.release()
 
@@ -999,6 +999,12 @@ class CameraPipeline(threading.Thread):
                 evidence = encode_evidence_b64(annotated)
                 if evidence:
                     metadata["evidence_image"] = evidence
+                # The real YOLO class label was already computed for the
+                # evidence-image annotation above — also store it as a plain
+                # field so the UI can show "Truck"/"Bus"/etc. as text without
+                # needing to read pixels back out of the JPEG.
+                if cls in VEHICLE_CLASSES:
+                    metadata["vehicle_class"] = label
             self.ingest.detection(
                 camera_id=self.camera_id,
                 event_type="person" if cls in PERSON_CLASSES else "vehicle",
@@ -1058,13 +1064,13 @@ class CameraPipeline(threading.Thread):
         log.info("[%s] pipeline started (sample %.1f fps, ANPR=%s, face=%s)",
                  external_id(self.camera_id), SAMPLE_FPS,
                  bool(self.models.plate_ocr), bool(self.models.face_app))
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             loop_start = time.time()
             with self._frame_lock:
                 frame = None if self._latest_frame is None else self._latest_frame.copy()
                 frame_ts = self._latest_pts
             if frame is None:
-                self._stop.wait(1.0)
+                self._stop_event.wait(1.0)
                 continue
             try:
                 self._process_frame(frame, frame_ts)
@@ -1072,7 +1078,7 @@ class CameraPipeline(threading.Thread):
             except Exception:
                 log.exception("[%s] inference tick failed", external_id(self.camera_id))
             elapsed = time.time() - loop_start
-            self._stop.wait(max(interval - elapsed, 0.01))   # pace to SAMPLE_FPS
+            self._stop_event.wait(max(interval - elapsed, 0.01))   # pace to SAMPLE_FPS
 
     def _process_frame(self, frame: np.ndarray, frame_ts: float | None) -> None:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

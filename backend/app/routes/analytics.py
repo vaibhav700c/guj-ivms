@@ -233,6 +233,7 @@ def generic_events(limit: int = Query(100, ge=1, le=500), event_type: str | None
             "bbox": d.bbox,
             "source": d.source,
             "timestamp": d.timestamp.isoformat(),
+            "vehicle_class": (d.metadata_json or {}).get("vehicle_class"),
             "has_evidence_image": bool((d.metadata_json or {}).get("evidence_image")),
         }
         for d in events

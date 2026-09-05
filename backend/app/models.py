@@ -251,3 +251,44 @@ class CameraHealthLog(Base):
     # exist yet, so every row is currently "simulator" until one is wired up.
     source: Mapped[str] = mapped_column(String(20), default="edge_worker", index=True)
     time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class CameraCapabilityRun(Base):
+    """A real, automated, one-camera-at-a-time CV verification pass.
+
+    Distinct from `Camera.analytics_config`'s CAMERA_CAPABILITY_NOTES, which
+    is an operator's manual visual read of each feed — this is the empirical
+    companion: run the actual YOLOv8/plate-OCR/ArcFace pipeline against one
+    real camera in isolation (no CPU contention from other cameras, so it
+    gets a fair, fast, unshared shot), for a bounded window, and record
+    exactly what it really found. `analytics/run_capability_audit.py`
+    produces these; `GET /api/v1/cameras/{id}/capability-runs` and the
+    Camera Registry drawer surface the latest one per camera.
+    """
+
+    __tablename__ = "camera_capability_runs"
+    __table_args__ = (Index("ix_ccr_camera_time", "camera_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    camera_id: Mapped[int] = mapped_column(ForeignKey("cameras.id"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_s: Mapped[float] = mapped_column(Float)
+    frames_processed: Mapped[int] = mapped_column(Integer, default=0)
+    person_detections: Mapped[int] = mapped_column(Integer, default=0)
+    vehicle_detections: Mapped[int] = mapped_column(Integer, default=0)
+    face_detections: Mapped[int] = mapped_column(Integer, default=0)
+    face_matches: Mapped[int] = mapped_column(Integer, default=0)
+    # Raw analytics/worker.py CameraPipeline.anpr_stats dict for this run —
+    # raw/rejected_format/rejected_too_small/rejected_static/pushed.
+    anpr_stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    plates_found: Mapped[list] = mapped_column(JSON, default=list)  # format-valid plate strings this run
+    # A representative real evidence frame from this specific run — whichever
+    # detection had the single highest confidence — so the UI can show a
+    # genuine "this is what the camera saw" snapshot, not a placeholder.
+    best_evidence_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    best_evidence_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    camera: Mapped["Camera"] = relationship()
